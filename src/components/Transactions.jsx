@@ -57,10 +57,14 @@ export default function Transactions({ clientId = null }) {
   const load = useCallback(async () => {
     setLoading(true); setLoadError(null)
     try {
+      // The .order('id') tiebreaker makes .range() pagination stable — without a
+      // total order, Postgres may repeat or skip rows across pages.
       const base = () => supabase
         .from('bank_transactions')
         .select('id, transaction_date, description, amount, category, account, reference_id')
         .eq('client_id', clientId)
+        .order('transaction_date')
+        .order('id')
 
       const [firstRes, coaRes] = await Promise.all([
         base().range(0, 999),
@@ -146,6 +150,16 @@ export default function Transactions({ clientId = null }) {
     return [...mainGroups, ...sepGroups]
   }, [txns, fuzzy, separated])
 
+  // Assignments whose group key no longer exists (fuzzy toggle or separation
+  // regrouped things) are excluded, so the pending count and Save stay honest.
+  const validAssignments = useMemo(() => {
+    const keys = new Set(groups.map(g => g.key))
+    const entries = Object.entries(assignments).filter(([k]) => keys.has(k))
+    return entries.length === Object.keys(assignments).length
+      ? assignments
+      : Object.fromEntries(entries)
+  }, [groups, assignments])
+
   // ── Helpers ────────────────────────────────────────────────────────────────
 
   const effectiveCat = useCallback(
@@ -165,8 +179,9 @@ export default function Transactions({ clientId = null }) {
 
   const rejectSuggestion = g => setRejected(p => ({ ...p, [g.key]: true }))
 
-  const separateTxn = id => setSeparated(prev => new Set([...prev, id]))
-  const rejoinTxn   = id => setSeparated(prev => { const n = new Set(prev); n.delete(id); return n })
+  // Separating/rejoining regenerates group keys, so drop the selection with it
+  const separateTxn = id => { setSeparated(prev => new Set([...prev, id])); setSelected(new Set()) }
+  const rejoinTxn   = id => { setSeparated(prev => { const n = new Set(prev); n.delete(id); return n }); setSelected(new Set()) }
 
   // ── Filter + pagination ────────────────────────────────────────────────────
 
@@ -191,7 +206,7 @@ export default function Transactions({ clientId = null }) {
 
   const uncatCount   = useMemo(() => groups.filter(g => !effectiveCat(g)).length, [groups, effectiveCat])
   const suggCount    = useMemo(() => groups.filter(g => hasSugg(g)).length, [groups, hasSugg])
-  const pendingCount = Object.keys(assignments).length
+  const pendingCount = Object.keys(validAssignments).length
 
   // ── Upload coverage ────────────────────────────────────────────────────────
 
@@ -250,7 +265,7 @@ export default function Transactions({ clientId = null }) {
     setSaving(true); setSavedMsg('')
     try {
       const idToCat = {}
-      for (const [key, cat] of Object.entries(assignments)) {
+      for (const [key, cat] of Object.entries(validAssignments)) {
         const g = groups.find(g => g.key === key)
         if (g) g.txns.forEach(t => { idToCat[t.id] = cat || null })
       }
@@ -282,7 +297,7 @@ export default function Transactions({ clientId = null }) {
   }
 
   const acceptAll = () => {
-    const next = { ...assignments }
+    const next = { ...validAssignments }
     groups.forEach(g => { if (hasSugg(g)) next[g.key] = g.suggestedCat })
     setAssignments(next)
   }
@@ -296,7 +311,7 @@ export default function Transactions({ clientId = null }) {
   }
   const applyBulk = () => {
     if (!selected.size) return
-    const next = { ...assignments }
+    const next = { ...validAssignments }
     selected.forEach(k => { next[k] = bulkCat })
     setAssignments(next); setSelected(new Set()); setBulkCat('')
   }
@@ -338,7 +353,12 @@ export default function Transactions({ clientId = null }) {
           {txns.length > 0 && (
             <button style={s.btnDanger} disabled={saving} onClick={deleteAll}>Delete All</button>
           )}
-          <button style={s.btnSecondary} onClick={() => setShowImport(true)}>↑ Import CSV</button>
+          <button
+            style={{ ...s.btnSecondary, ...(loadingMore ? s.btnDisabled : {}) }}
+            disabled={loadingMore}
+            title={loadingMore ? 'Waiting for all transactions to load — duplicate detection needs the full list' : undefined}
+            onClick={() => setShowImport(true)}
+          >↑ Import CSV</button>
           <button
             style={{ ...s.btnPrimary, ...(pendingCount === 0 || saving ? s.btnDisabled : {}) }}
             disabled={pendingCount === 0 || saving}
@@ -375,7 +395,7 @@ export default function Transactions({ clientId = null }) {
           ))}
         </div>
         <label style={s.fuzzyLabel}>
-          <input type="checkbox" checked={fuzzy} onChange={e => setFuzzy(e.target.checked)} />
+          <input type="checkbox" checked={fuzzy} onChange={e => { setFuzzy(e.target.checked); setSelected(new Set()) }} />
           Group similar merchants
         </label>
       </div>

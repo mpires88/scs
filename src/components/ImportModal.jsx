@@ -40,27 +40,28 @@ export default function ImportModal({ clientId, allCats, groupedCats = null, exi
       let text = e.target.result.replace(/^\uFEFF/, '')
 
       // Some bank exports (e.g. Freedom Checking) have a metadata preamble followed by the
-      // real transaction section. Find the last header row that contains both "date" and
-      // "description" (case-insensitive) and strip everything above it.
+      // real transaction section. Find the last header row that contains both the words
+      // "date" and "description" (whole words — "update" must not match) and strip
+      // everything above it.
       const allLines = text.split(/\r?\n/)
       let txnSectionStart = 0
       for (let i = 0; i < allLines.length; i++) {
         const lower = allLines[i].toLowerCase()
-        if (lower.includes('date') && lower.includes('description')) txnSectionStart = i
+        if (/\bdate\b/.test(lower) && /\bdescription\b/.test(lower)) txnSectionStart = i
       }
       if (txnSectionStart > 0) text = allLines.slice(txnSectionStart).join('\n')
 
       const raw = parseCSVText(text)
       if (!raw.headers.length) { setMapError('Could not parse CSV — no headers found'); return }
 
-      // Drop summary/totals rows (first field is "Totals" or date looks like a range "X - Y")
-      const data = {
-        headers: raw.headers,
-        rows: raw.rows.filter(r => {
-          const firstVal = (Object.values(r)[0] || '').trim()
-          return firstVal.toLowerCase() !== 'totals' && !firstVal.includes(' - ')
-        }),
-      }
+      // Drop summary rows: first field is "Totals", or a date range like
+      // "01/01/2024 - 01/31/2024" (must start with a digit — descriptions
+      // containing " - " are real data and stay).
+      const rows = raw.rows.filter(r => {
+        const firstVal = (Object.values(r)[0] || '').trim()
+        return firstVal.toLowerCase() !== 'totals' && !/^\d[\d/.-]*\s+-\s+\d/.test(firstVal)
+      })
+      const data = { headers: raw.headers, rows, skipped: raw.rows.length - rows.length }
 
       const { cols, splitAmounts } = autoDetectCols(data.headers)
       const base = DEFAULT_CFG()
@@ -312,7 +313,11 @@ export default function ImportModal({ clientId, allCats, groupedCats = null, exi
           {/* Step 2: Column mapping */}
           {step === 'mapping' && csv && (
             <div>
-              <p style={m.sub}>{csv.rows.length} rows · columns: <em>{csv.headers.join(', ')}</em></p>
+              <p style={m.sub}>
+                {csv.rows.length} rows
+                {csv.skipped > 0 && <> · {csv.skipped} summary row{csv.skipped !== 1 ? 's' : ''} skipped</>}
+                {' '}· columns: <em>{csv.headers.join(', ')}</em>
+              </p>
 
               <ISection title="Bank">
                 <IRow label="Saved banks">

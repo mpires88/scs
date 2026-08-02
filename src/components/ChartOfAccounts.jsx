@@ -3,7 +3,7 @@ import {
   PL_SECTIONS, BS_SECTIONS,
   isPLSection, isBSSection,
   fetchAccounts, addAccount as coaAdd, setSection, setParent, setCostType,
-  renameAccount, deleteAccount, countTransactionsUsing, seedDefaults, seedMissingDefaults,
+  renameAccount, deleteAccount, countTransactionsUsing, seedDefaults,
 } from '../lib/chartOfAccounts'
 import { T } from '../lib/theme'
 
@@ -57,12 +57,7 @@ export default function ChartOfAccounts({ clientId }) {
   // post-mutation reloads refresh the table silently.
   const load = useCallback(async () => {
     try {
-      let { accounts: rows, legacy: isLegacy } = await fetchAccounts(clientId)
-      // Silently insert any default accounts missing from the database
-      if (clientId) {
-        const seeded = await seedMissingDefaults(clientId, new Set(rows.map(r => r.name)))
-        if (seeded) ({ accounts: rows, legacy: isLegacy } = await fetchAccounts(clientId))
-      }
+      const { accounts: rows, legacy: isLegacy } = await fetchAccounts(clientId)
       setAccounts(rows)
       setLegacy(isLegacy)
       setError(null)
@@ -145,7 +140,8 @@ export default function ChartOfAccounts({ clientId }) {
   }
 
   const startDelete = async (name) => {
-    const txCount = await countTransactionsUsing(clientId, name)
+    let txCount = null // null = count unavailable, don't claim "no transactions use it"
+    try { txCount = await countTransactionsUsing(clientId, name) } catch { /* keep null */ }
     setReassignTo('')
     setDeleting({ name, txCount })
   }
@@ -340,11 +336,13 @@ export default function ChartOfAccounts({ clientId }) {
                             <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
                               <span style={{ fontSize: 12, fontWeight: 600, color: T.danger }}>
                                 Remove &quot;{acc.name}&quot;?
-                                {deleting.txCount > 0
-                                  ? ` ${deleting.txCount} transaction${deleting.txCount !== 1 ? 's' : ''} use${deleting.txCount === 1 ? 's' : ''} it.`
-                                  : ' No transactions use it.'}
+                                {deleting.txCount == null
+                                  ? ' Could not check how many transactions use it.'
+                                  : deleting.txCount > 0
+                                    ? ` ${deleting.txCount} transaction${deleting.txCount !== 1 ? 's' : ''} use${deleting.txCount === 1 ? 's' : ''} it.`
+                                    : ' No transactions use it.'}
                               </span>
-                              {deleting.txCount > 0 && (
+                              {deleting.txCount !== 0 && (
                                 <div style={{ display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap' }}>
                                   <span style={{ fontSize: 10.5, color: T.charcoal }}>Reassign them to:</span>
                                   <select
@@ -361,7 +359,7 @@ export default function ChartOfAccounts({ clientId }) {
                               )}
                               <div style={{ display: 'flex', gap: 6 }}>
                                 <button style={{ ...s.btnDanger, padding: '3px 10px', fontSize: 10 }} onClick={confirmDelete} disabled={saving}>
-                                  {deleting.txCount > 0 && !reassignTo ? 'Delete & leave uncategorized' : 'Delete'}
+                                  {deleting.txCount !== 0 && !reassignTo ? 'Delete & leave uncategorized' : 'Delete'}
                                 </button>
                                 <button style={{ ...s.btnSecondary, padding: '3px 8px', fontSize: 10 }} onClick={() => setDeleting(null)}>Cancel</button>
                               </div>

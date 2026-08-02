@@ -125,9 +125,11 @@ export function computeRunway({ cash, monthlyPL }) {
 
 // ─── Monthly close checklist ──────────────────────────────────────────────────
 // Checks the most recent COMPLETE month: bank data imported, Square uploaded,
-// and nothing left uncategorized.
+// and nothing left uncategorized. `prevMonthTxnCount` must count ALL of last
+// month's bank rows (the dashboard's txns list excludes uncategorized ones);
+// the txns fallback exists only for callers that don't have that count.
 
-export function computeCloseChecklist({ txns, squareReports, uncatCount }) {
+export function computeCloseChecklist({ txns, squareReports, uncatCount, prevMonthTxnCount = null }) {
   const now = new Date()
   const prev = new Date(now.getFullYear(), now.getMonth() - 1, 1)
   const ym = `${prev.getFullYear()}-${String(prev.getMonth() + 1).padStart(2, '0')}`
@@ -136,7 +138,9 @@ export function computeCloseChecklist({ txns, squareReports, uncatCount }) {
   return {
     month: ym,
     label,
-    bankImported: txns.some(t => (t.transaction_date || '').startsWith(ym)),
+    bankImported: prevMonthTxnCount != null
+      ? prevMonthTxnCount > 0
+      : txns.some(t => (t.transaction_date || '').startsWith(ym)),
     squareUploaded: squareReports.some(r => r.period === ym),
     allCategorized: uncatCount === 0,
     uncatCount,

@@ -31,9 +31,22 @@ create table if not exists public.inventory_buys (
   created_at timestamptz not null default now()
 );
 
--- ── 4. Row Level Security ────────────────────────────────────────────────────
+-- ── 4. Unique constraints the app's upserts depend on ────────────────────────
+-- categories upserts use ON CONFLICT (name); square_reports uses
+-- ON CONFLICT (client_id, period). Both need a matching unique index.
+
+create unique index if not exists categories_name_key
+  on public.categories (name);
+create unique index if not exists square_reports_client_id_period_key
+  on public.square_reports (client_id, period);
+
+-- ── 5. Row Level Security ────────────────────────────────────────────────────
 -- Single-owner model: any signed-in (authenticated) user has full access;
 -- the public anon key can read/write NOTHING once these are in place.
+-- IMPORTANT: because every authenticated user is trusted, public signups MUST
+-- be disabled (Dashboard → Authentication → Sign In / Providers → turn off
+-- "Allow new users to sign up") after creating the owner's account. The app
+-- also requests magic links with shouldCreateUser: false.
 -- (When a second user ever joins, tighten these to check auth.uid().)
 
 alter table public.bank_transactions enable row level security;

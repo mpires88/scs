@@ -1,5 +1,5 @@
 import { useState, useEffect, useMemo, useCallback } from 'react'
-import { supabase, fetchAll } from '../lib/supabase'
+import { supabase, fetchAll, isMissingSchemaError } from '../lib/supabase'
 import { T, fmt2, fmt } from '../lib/theme'
 
 const SOURCES    = ['Card show', 'Collection buy', 'Distributor', 'Retail arbitrage', 'Other']
@@ -11,6 +11,7 @@ export default function Buys({ clientId }) {
   const [buys,       setBuys]       = useState([])
   const [loading,    setLoading]    = useState(true)
   const [tableMissing, setTableMissing] = useState(false)
+  const [loadError,  setLoadError]  = useState(null)
   const [saving,     setSaving]     = useState(false)
   const [msg,        setMsg]        = useState('')
 
@@ -21,11 +22,15 @@ export default function Buys({ clientId }) {
     try {
       const rows = await fetchAll(() => supabase.from('inventory_buys')
         .select('id, buy_date, description, category, source, cost')
-        .eq('client_id', clientId).order('buy_date', { ascending: false }))
+        .eq('client_id', clientId).order('buy_date', { ascending: false }).order('id'))
       setBuys(rows)
       setTableMissing(false)
-    } catch {
-      setTableMissing(true)  // table doesn't exist until migration.sql is run
+      setLoadError(null)
+    } catch (e) {
+      // Only a genuinely missing table means "run migration.sql" — anything
+      // else (network, auth) is a load failure and must say so
+      if (isMissingSchemaError(e)) { setTableMissing(true); setLoadError(null) }
+      else { setTableMissing(false); setLoadError(e.message || String(e)) }
       setBuys([])
     }
     setLoading(false)
@@ -98,7 +103,11 @@ export default function Buys({ clientId }) {
 
       <div style={{ padding:'20px 28px', maxWidth:920 }}>
 
-        {tableMissing ? (
+        {loadError ? (
+          <div style={{ background:'#FDE8E8', border:'1px solid #F5C2C2', borderRadius:6, padding:'10px 14px', fontSize:12, color:'#991B1B' }}>
+            Failed to load: {loadError}
+          </div>
+        ) : tableMissing ? (
           <div style={{ background:'#FEF3C7', border:'1px solid #FCD34D', borderRadius:6, padding:'12px 16px', fontSize:12, color:'#92400E', lineHeight:1.7 }}>
             <strong>One-time setup needed:</strong> the <code>inventory_buys</code> table doesn&apos;t exist yet.
             Open your Supabase dashboard → SQL Editor, paste the contents of <code>supabase/migration.sql</code>,

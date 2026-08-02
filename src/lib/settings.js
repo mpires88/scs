@@ -1,4 +1,4 @@
-import { supabase } from './supabase'
+import { supabase, isMissingSchemaError } from './supabase'
 
 // Key/value settings backed by the client_settings table (see supabase/migration.sql).
 // Falls back to localStorage until the migration has been run, so the app
@@ -9,7 +9,9 @@ let tableReady = null
 async function settingsReady() {
   if (tableReady !== null) return tableReady
   const { error } = await supabase.from('client_settings').select('key').limit(1)
-  tableReady = !error
+  if (!error) tableReady = true
+  else if (isMissingSchemaError(error)) tableReady = false
+  else throw error // transient failure — don't cache a verdict
   return tableReady
 }
 

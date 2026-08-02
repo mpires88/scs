@@ -1,4 +1,4 @@
-import { supabase } from './supabase'
+import { supabase, isMissingSchemaError } from './supabase'
 
 export const PL_SECTIONS = [
   'Revenue',
@@ -119,7 +119,9 @@ let schemaReady = null
 export async function coaSchemaReady() {
   if (schemaReady !== null) return schemaReady
   const { error } = await supabase.from('categories').select('pl_section').limit(1)
-  schemaReady = !error
+  if (!error) schemaReady = true
+  else if (isMissingSchemaError(error)) schemaReady = false
+  else throw error // transient failure — don't cache a verdict
   return schemaReady
 }
 
@@ -284,7 +286,7 @@ export async function countTransactionsUsing(clientId, name) {
   const { count, error } = await supabase.from('bank_transactions')
     .select('id', { count: 'exact', head: true })
     .eq('client_id', clientId).eq('category', name)
-  if (error) return 0
+  if (error) throw error
   return count ?? 0
 }
 
@@ -301,22 +303,4 @@ export async function seedDefaults(clientId) {
     DEFAULT_ACCOUNTS.forEach(a => { if (!m[a.name]) m[a.name] = a.pl_section })
     saveLS(LS_KEY, m)
   }
-}
-
-// Insert any default accounts missing from the DB (used on first load).
-export async function seedMissingDefaults(clientId, existingNames) {
-  const missing = DEFAULT_ACCOUNTS.filter(a => !existingNames.has(a.name))
-  if (!missing.length) return false
-  const ready = await coaSchemaReady()
-  const rows = missing.map(a => ({
-    client_id: clientId, name: a.name, sort_order: a.sort_order,
-    ...(ready ? { pl_section: a.pl_section, cost_type: a.cost_type ?? null } : {}),
-  }))
-  await supabase.from('categories').upsert(rows, { onConflict: 'name' })
-  if (!ready) {
-    const m = loadLS(LS_KEY)
-    missing.forEach(a => { if (!m[a.name]) m[a.name] = a.pl_section })
-    saveLS(LS_KEY, m)
-  }
-  return true
 }

@@ -1,4 +1,4 @@
-import { useState, useEffect, useMemo, useCallback } from 'react'
+import { useState, useEffect, useMemo, useCallback, Fragment } from 'react'
 import { supabase, fetchAll } from '../lib/supabase'
 import { PL_SECTIONS, fetchAccounts } from '../lib/chartOfAccounts'
 import { getSetting, setSetting } from '../lib/settings'
@@ -33,7 +33,7 @@ export default function ReportsPL({ clientId }) {
           fetchAll(() => supabase.from('bank_transactions')
             .select('transaction_date, amount, category')
             .eq('client_id', clientId).not('category', 'is', null).neq('category', '')
-            .order('transaction_date')),
+            .order('transaction_date').order('id')),
           fetchAccounts(clientId),
           getSetting(clientId, 'budgets', {}).catch(() => ({})),
         ])
@@ -140,13 +140,16 @@ export default function ReportsPL({ clientId }) {
     const displaySign = section => EXPENSE_SECTIONS.has(section) ? -1 : 1
 
     sections.forEach(sec => {
-      if (!sec.rows.length) return
-      lines.push([sec.section])
-      const sign = displaySign(sec.section)
-      sec.rows.forEach(r => {
-        lines.push([`  ${r.name}`, ...months.map(m => ((r.byMonth[m] ?? 0) * sign).toFixed(2)), (r.total * sign).toFixed(2)])
-      })
-      lines.push([`Total ${sec.section}`, ...months.map(m => (sec.totals[m] * sign).toFixed(2)), (sec.total * sign).toFixed(2)])
+      if (sec.rows.length) {
+        lines.push([sec.section])
+        const sign = displaySign(sec.section)
+        sec.rows.forEach(r => {
+          lines.push([`  ${r.name}`, ...months.map(m => ((r.byMonth[m] ?? 0) * sign).toFixed(2)), (r.total * sign).toFixed(2)])
+        })
+        lines.push([`Total ${sec.section}`, ...months.map(m => (sec.totals[m] * sign).toFixed(2)), (sec.total * sign).toFixed(2)])
+      }
+      // Computed lines belong to the statement, not the section — emit them
+      // even when the section itself has no activity
       if (sec.section === 'Deductions to Income')
         lines.push(['NET REVENUE', ...months.map(m => computed.netRevenue.byMonth[m].toFixed(2)), computed.netRevenue.total.toFixed(2)])
       if (sec.section === 'Cost of Goods Sold')
@@ -249,16 +252,26 @@ export default function ReportsPL({ clientId }) {
               </thead>
               <tbody>
                 {statement.sections.map(sec => {
-                  if (!sec.rows.length) return null
                   const isExpense = EXPENSE_SECTIONS.has(sec.section)
                   const sign = isExpense ? -1 : 1
+                  const computedAfter = {
+                    'Deductions to Income': ['NET REVENUE',      statement.computed.netRevenue],
+                    'Cost of Goods Sold':   ['GROSS PROFIT',     statement.computed.grossProfit],
+                    'Operating Expenses':   ['OPERATING INCOME', statement.computed.opIncome],
+                  }[sec.section]
                   return (
-                    <SectionRows
-                      key={sec.section}
-                      sec={sec} sign={sign} months={statement.months} computed={statement.computed}
-                      showBudget={showBudget} budgets={budgets} drafts={drafts} setDrafts={setDrafts} saveBudget={saveBudget}
-                      isExpense={isExpense}
-                    />
+                    <Fragment key={sec.section}>
+                      {sec.rows.length > 0 && (
+                        <SectionRows
+                          sec={sec} sign={sign} months={statement.months}
+                          showBudget={showBudget} budgets={budgets} drafts={drafts} setDrafts={setDrafts} saveBudget={saveBudget}
+                          isExpense={isExpense}
+                        />
+                      )}
+                      {computedAfter && (
+                        <ComputedRow label={computedAfter[0]} data={computedAfter[1]} months={statement.months} showBudget={showBudget} />
+                      )}
+                    </Fragment>
                   )
                 })}
                 {/* Net income */}
@@ -290,15 +303,9 @@ export default function ReportsPL({ clientId }) {
   )
 }
 
-// One P&L section: header, account rows, subtotal, plus any computed line that follows it.
-function SectionRows({ sec, sign, months, computed, showBudget, budgets, drafts, setDrafts, saveBudget, isExpense }) {
+// One P&L section: header, account rows, subtotal.
+function SectionRows({ sec, sign, months, showBudget, budgets, drafts, setDrafts, saveBudget, isExpense }) {
   const monthCount = months.length
-
-  const computedAfter = {
-    'Deductions to Income': ['NET REVENUE',      computed.netRevenue],
-    'Cost of Goods Sold':   ['GROSS PROFIT',     computed.grossProfit],
-    'Operating Expenses':   ['OPERATING INCOME', computed.opIncome],
-  }[sec.section]
 
   return (
     <>
@@ -352,21 +359,25 @@ function SectionRows({ sec, sign, months, computed, showBudget, budgets, drafts,
         <td style={{ ...cell.num, borderLeft:`2px solid ${T.border}`, fontWeight:700, color:T.navy }}>{fmtCell(sec.total * sign)}</td>
         {showBudget && <><td style={cell.num}></td><td style={cell.num}></td></>}
       </tr>
-      {/* Computed line following this section */}
-      {computedAfter && (
-        <tr style={{ background:'#EBF1F7', borderBottom:`2px solid #B8CDE0` }}>
-          <td style={{ ...cell.td, fontWeight:700, color:T.navy, position:'sticky', left:0, background:'#EBF1F7' }}>{computedAfter[0]}</td>
-          {months.map(m => {
-            const v = computedAfter[1].byMonth[m]
-            return <td key={m} style={{ ...cell.num, fontWeight:600, color: v < 0 ? T.danger : T.navy }}>{fmtCell(v)}</td>
-          })}
-          <td style={{ ...cell.num, borderLeft:`2px solid ${T.border}`, fontWeight:700, color: computedAfter[1].total < 0 ? T.danger : T.navy }}>
-            {fmtCell(computedAfter[1].total)}
-          </td>
-          {showBudget && <><td style={cell.num}></td><td style={cell.num}></td></>}
-        </tr>
-      )}
     </>
+  )
+}
+
+// Computed statement line (Net Revenue, Gross Profit, Operating Income) —
+// rendered even when the section it follows has no activity.
+function ComputedRow({ label, data, months, showBudget }) {
+  return (
+    <tr style={{ background:'#EBF1F7', borderBottom:`2px solid #B8CDE0` }}>
+      <td style={{ ...cell.td, fontWeight:700, color:T.navy, position:'sticky', left:0, background:'#EBF1F7' }}>{label}</td>
+      {months.map(m => {
+        const v = data.byMonth[m]
+        return <td key={m} style={{ ...cell.num, fontWeight:600, color: v < 0 ? T.danger : T.navy }}>{fmtCell(v)}</td>
+      })}
+      <td style={{ ...cell.num, borderLeft:`2px solid ${T.border}`, fontWeight:700, color: data.total < 0 ? T.danger : T.navy }}>
+        {fmtCell(data.total)}
+      </td>
+      {showBudget && <><td style={cell.num}></td><td style={cell.num}></td></>}
+    </tr>
   )
 }
 

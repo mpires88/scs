@@ -55,6 +55,7 @@ export default function Dashboard({ clientId }) {
   const [sectionMap,    setSectionMap]    = useState({})
   const [buys,          setBuys]          = useState([])
   const [uncatCount,    setUncatCount]    = useState(0)
+  const [prevMonthTxnCount, setPrevMonthTxnCount] = useState(null)
   const [cash,          setCash]          = useState(null)   // { amount, asOf }
   const [cogsPct,       setCogsPct]       = useState({})     // squareCategory → %
   const [loading,       setLoading]       = useState(true)
@@ -64,19 +65,29 @@ export default function Dashboard({ clientId }) {
     let cancelled = false
     ;(async () => {
       setLoading(true); setError(null)
-      const [txnRes, sqRes, coaRes, buysRes, uncatNull, uncatEmpty, cashVal, cogsVal] = await Promise.all([
+      // Previous calendar month bounds for the close checklist (must include
+      // uncategorized rows, which the main txn query filters out)
+      const monthStart = d => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-01`
+      const now = new Date()
+      const prevMonthStart = monthStart(new Date(now.getFullYear(), now.getMonth() - 1, 1))
+      const curMonthStart  = monthStart(now)
+      const [txnRes, sqRes, coaRes, buysRes, uncatNull, uncatEmpty, prevMonthRes, cashVal, cogsVal] = await Promise.all([
         fetchAll(() => supabase.from('bank_transactions').select('transaction_date, amount, category, description')
-          .eq('client_id', clientId).not('category', 'is', null).neq('category', '').order('transaction_date'))
+          .eq('client_id', clientId).not('category', 'is', null).neq('category', '')
+          .order('transaction_date').order('id'))
           .then(data => ({ data, error: null }))
           .catch(e => ({ data: null, error: e })),
         supabase.from('square_reports').select('period, gross_sales, net_sales, tax_collected, fees, net_total, categories')
           .eq('client_id', clientId).order('period'),
-        fetchSectionMap(clientId).catch(() => ({ map: {}, accounts: [] })),
+        fetchSectionMap(clientId).then(r => ({ ...r, error: null }))
+          .catch(e => ({ map: {}, accounts: [], error: e })),
         supabase.from('inventory_buys').select('buy_date, category, cost').eq('client_id', clientId),
         supabase.from('bank_transactions').select('id', { count: 'exact', head: true })
           .eq('client_id', clientId).is('category', null),
         supabase.from('bank_transactions').select('id', { count: 'exact', head: true })
           .eq('client_id', clientId).eq('category', ''),
+        supabase.from('bank_transactions').select('id', { count: 'exact', head: true })
+          .eq('client_id', clientId).gte('transaction_date', prevMonthStart).lt('transaction_date', curMonthStart),
         getSetting(clientId, 'cash_balance', null).catch(() => null),
         getSetting(clientId, 'cogs_pct', {}).catch(() => ({})),
       ])
@@ -87,9 +98,12 @@ export default function Dashboard({ clientId }) {
         setSectionMap(coaRes.map)
         setBuys(buysRes.error ? [] : (buysRes.data ?? []))   // table may not exist yet
         setUncatCount((uncatNull.count ?? 0) + (uncatEmpty.count ?? 0))
+        setPrevMonthTxnCount(prevMonthRes.error ? null : (prevMonthRes.count ?? 0))
         setCash(cashVal)
         setCogsPct(cogsVal || {})
-        if (txnRes.error) setError(txnRes.error.message)
+        // A failed section map silently reclassifies everything as OpEx — surface it
+        const loadErr = txnRes.error || coaRes.error
+        if (loadErr) setError(loadErr.message)
         setLoading(false)
       }
     })()
@@ -167,12 +181,18 @@ export default function Dashboard({ clientId }) {
   )
   const runway    = useMemo(() => computeRunway({ cash, monthlyPL }), [cash, monthlyPL])
   const checklist = useMemo(
-    () => computeCloseChecklist({ txns, squareReports, uncatCount }),
-    [txns, squareReports, uncatCount]
+    () => computeCloseChecklist({ txns, squareReports, uncatCount, prevMonthTxnCount }),
+    [txns, squareReports, uncatCount, prevMonthTxnCount]
   )
+  // Margins come from Square data, which may cover a different year than the
+  // bank transactions — use the latest year that actually has Square reports.
+  const marginYear = useMemo(() => {
+    const yrs = squareReports.map(r => +(r.period || '').slice(0, 4)).filter(Boolean)
+    return yrs.length ? Math.max(...yrs) : (curYear ?? new Date().getFullYear())
+  }, [squareReports, curYear])
   const margins   = useMemo(
-    () => computeCategoryMargins({ squareReports, buys, cogsPct, year: curYear ?? new Date().getFullYear() }),
-    [squareReports, buys, cogsPct, curYear]
+    () => computeCategoryMargins({ squareReports, buys, cogsPct, year: marginYear }),
+    [squareReports, buys, cogsPct, marginYear]
   )
 
   const saveCash = useCallback(async amount => {
@@ -386,7 +406,7 @@ export default function Dashboard({ clientId }) {
                 <Tooltip content={<CustomTip />} />
                 <Legend wrapperStyle={{ fontSize:11 }} />
                 {years.map((yr, i) => (
-                  <Bar key={yr} dataKey={String(yr)} fill={[D.border, D.steel, D.navy][i] ?? D.gold} radius={[3,3,0,0]} />
+                  <Bar key={yr} dataKey={String(yr)} fill={[D.border, D.steel, D.navy][i] ?? PIE_COLORS[i % PIE_COLORS.length]} radius={[3,3,0,0]} />
                 ))}
               </BarChart>
             </ResponsiveContainer>
@@ -421,7 +441,7 @@ export default function Dashboard({ clientId }) {
 
         {/* ── Margin by product category ── */}
         {margins.length > 0 && (
-          <MarginTable margins={margins} year={curYear ?? new Date().getFullYear()} cogsPct={cogsPct} onSavePct={saveCogsPct} />
+          <MarginTable margins={margins} year={marginYear} cogsPct={cogsPct} onSavePct={saveCogsPct} />
         )}
 
         {/* ── Square: Revenue by Category ── */}

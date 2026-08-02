@@ -14,10 +14,14 @@ export default function Login() {
     setSending(true); setError('')
     const { error: err } = await supabase.auth.signInWithOtp({
       email: email.trim(),
-      options: { emailRedirectTo: window.location.origin },
+      // Never auto-create accounts: RLS trusts every authenticated user, so a
+      // self-service signup would hand a stranger full access to the books.
+      options: { emailRedirectTo: window.location.origin, shouldCreateUser: false },
     })
     setSending(false)
-    if (err) setError(err.message)
+    if (err) setError(/signups? not allowed/i.test(err.message)
+      ? 'No account exists for that email. The owner can add you in Supabase → Authentication → Users.'
+      : err.message)
     else setSent(true)
   }
 

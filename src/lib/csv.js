@@ -49,6 +49,9 @@ export function parseDate(raw, fmt) {
   d = String(+d).padStart(2, '0')
   if (String(y).length !== 4 || isNaN(+y) || isNaN(+m) || isNaN(+d)) return null
   if (+m < 1 || +m > 12 || +d < 1 || +d > 31) return null
+  // Reject impossible dates (e.g. Feb 31) — they'd fail the whole insert batch at the DB
+  const dt = new Date(`${y}-${m}-${d}T00:00:00Z`)
+  if (dt.getUTCMonth() + 1 !== +m || dt.getUTCDate() !== +d) return null
   return `${y}-${m}-${d}`
 }
 

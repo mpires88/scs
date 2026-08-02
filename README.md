@@ -34,11 +34,20 @@ Routes: `/` (Dashboard) · `/transactions` · `/pl` · `/buys` · `/accounts` ·
    `client_settings` and `inventory_buys` tables, and enables Row Level
    Security so the anon key alone can't read or write anything.
 
-3. **Enable sign-in**
+3. **Enable sign-in — and lock out everyone else**
 
-   Supabase dashboard → Authentication → make sure the **Email** provider is
-   enabled (magic links). The app emails you a one-time sign-in link — no
-   password. For local development before auth is set up, put
+   Supabase dashboard → Authentication:
+
+   1. Make sure the **Email** provider is enabled (magic links). The app
+      emails you a one-time sign-in link — no password.
+   2. Create the owner's account: **Users → Add user** with your email.
+      (The app requests links with `shouldCreateUser: false`, so unknown
+      emails are rejected — the account must exist first.)
+   3. Turn **off** "Allow new users to sign up". The RLS policies trust
+      *every* signed-in user, so if signups stay open, anyone who finds the
+      URL could create an account and read/write all your data.
+
+   For local development before auth is set up, put
    `NEXT_PUBLIC_DISABLE_AUTH=true` in `.env` (never deploy with this on).
 
    ⚠️ The Supabase **service key** (`SUPABASE_SERVICE_KEY` in `.env`) bypasses
