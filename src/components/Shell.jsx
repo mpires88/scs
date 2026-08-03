@@ -4,6 +4,7 @@ import { useState, useEffect } from 'react'
 import Link from 'next/link'
 import { usePathname } from 'next/navigation'
 import { supabase } from '../lib/supabase'
+import { UnsavedChangesContext, useUnsavedChanges } from '../lib/unsavedChanges'
 import Login from './Login'
 import ErrorBoundary from './ErrorBoundary'
 
@@ -84,6 +85,7 @@ const NAV = [
 export default function Shell({ children }) {
   const pathname = usePathname()
   const [session, setSession] = useState(AUTH_DISABLED ? null : undefined) // undefined = still checking
+  const [dirty, setDirty] = useState(false)
 
   useEffect(() => {
     if (AUTH_DISABLED) return
@@ -103,6 +105,7 @@ export default function Shell({ children }) {
   }
 
   return (
+    <UnsavedChangesContext.Provider value={{ dirty, setDirty }}>
     <div style={{ display: 'flex', minHeight: '100vh', background: '#F5F4F0', fontFamily: '-apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif', colorScheme: 'light' }}>
 
       {/* ── Sidebar ── */}
@@ -154,15 +157,20 @@ export default function Shell({ children }) {
         </ErrorBoundary>
       </main>
     </div>
+    </UnsavedChangesContext.Provider>
   )
 }
 
 function NavItem({ item, active }) {
   const { href, label, Icon } = item
   const [hover, setHover] = useState(false)
+  const { dirty } = useUnsavedChanges()
   return (
     <Link
       href={href}
+      onClick={e => {
+        if (dirty && !active && !confirm('You have unsaved category changes. Leave without saving?')) e.preventDefault()
+      }}
       onMouseEnter={() => setHover(true)}
       onMouseLeave={() => setHover(false)}
       style={{
