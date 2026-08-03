@@ -394,6 +394,9 @@ export default function Dashboard({ clientId }) {
           <KpiCard label={`${curYear} Net P&L`} value={fmt(curNetProfit)} sub="After all expenses" warn={curNetProfit < 0} />
         </div>
 
+        {/* ── Month comparison (same month, year over year) ── */}
+        <MonthComparison monthlyPL={monthlyPL} txns={txns} />
+
         {/* ── Revenue Comparison ── */}
         {years.length >= 2 && (
           <>
@@ -601,6 +604,148 @@ export default function Dashboard({ clientId }) {
 
       </div>
     </div>
+  )
+}
+
+// ─── Month comparison ─────────────────────────────────────────────────────────
+// Same-month year-over-year: defaults to the most recent complete month with
+// data (e.g. this July) against the same month last year.
+
+function MonthComparison({ monthlyPL, txns }) {
+  const now = new Date()
+  const curYM = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}`
+  const periods = monthlyPL.map(r => r.period)
+  const complete = periods.filter(p => p < curYM)
+  const [ym, setYm] = useState(complete[complete.length - 1] ?? periods[periods.length - 1])
+
+  const [y, m] = ym.split('-').map(Number)
+  const prevYm = `${y - 1}-${String(m).padStart(2, '0')}`
+  const cur  = monthlyPL.find(r => r.period === ym)
+  const prev = monthlyPL.find(r => r.period === prevYm)
+
+  // Per-category deltas between the two months. Amounts keep the DB sign
+  // convention (revenue +, expenses −), so delta > 0 always means "helped
+  // net profit" — more income or less spending — regardless of category type.
+  const catChanges = useMemo(() => {
+    const sum = {}
+    txns.forEach(t => {
+      const p = (t.transaction_date || '').slice(0, 7)
+      if (p !== ym && p !== prevYm) return
+      if (!t.category) return
+      if (!sum[t.category]) sum[t.category] = { cur: 0, prev: 0 }
+      sum[t.category][p === ym ? 'cur' : 'prev'] += Number(t.amount) || 0
+    })
+    return Object.entries(sum)
+      .map(([name, v]) => ({ name, ...v, delta: v.cur - v.prev }))
+      .filter(r => Math.abs(r.delta) >= 1)
+      .sort((a, b) => Math.abs(b.delta) - Math.abs(a.delta))
+      .slice(0, 6)
+  }, [txns, ym, prevYm])
+
+  if (!cur) return null
+
+  const metrics = [
+    { label: 'Revenue',            cur: cur.revenue,        prev: prev?.revenue,        goodUp: true  },
+    { label: 'COGS',               cur: cur.cogs,           prev: prev?.cogs,           goodUp: false },
+    { label: 'Gross Profit',       cur: cur.grossProfit,    prev: prev?.grossProfit,    goodUp: true  },
+    { label: 'Gross Margin',       cur: cur.grossMarginPct, prev: prev?.grossMarginPct, goodUp: true, isPct: true },
+    { label: 'Operating Expenses', cur: cur.totalOpex,      prev: prev?.totalOpex,      goodUp: false },
+    { label: 'Net Profit',         cur: cur.netProfit,      prev: prev?.netProfit,      goodUp: true  },
+  ]
+
+  const th = right => ({ textAlign: right ? 'right' : 'left', padding:'7px 12px', background:D.page, fontSize:9.5, fontWeight:700, color:D.gold, textTransform:'uppercase', letterSpacing:'.06em', whiteSpace:'nowrap', borderBottom:`2px solid ${D.border}` })
+  const td = { padding:'6px 12px', fontSize:11.5, textAlign:'right', fontVariantNumeric:'tabular-nums', color:D.charcoal }
+  const deltaColor = (d, goodUp) => Math.abs(d) < 0.005 ? D.charcoal : ((d > 0) === goodUp ? D.success : D.danger)
+
+  return (
+    <>
+      <h3 style={{ fontSize:9.5, fontWeight:700, color:D.gold, textTransform:'uppercase', letterSpacing:'.07em', margin:'28px 0 12px', borderBottom:`1px solid ${D.border}`, paddingBottom:7, display:'flex', justifyContent:'space-between', alignItems:'center' }}>
+        <span>Month Comparison · {MON[m]} {y} vs {MON[m]} {y - 1}</span>
+        <select
+          value={ym}
+          onChange={e => setYm(e.target.value)}
+          style={{ fontSize:10.5, padding:'2px 6px', border:`1px solid ${D.border}`, borderRadius:4, color:D.charcoal, background:'#fff', outline:'none', fontWeight:400, textTransform:'none', letterSpacing:'normal' }}
+        >
+          {[...periods].reverse().map(p => {
+            const [py, pm] = p.split('-').map(Number)
+            return <option key={p} value={p}>{MON[pm]} {py}</option>
+          })}
+        </select>
+      </h3>
+
+      {!prev && (
+        <p style={{ fontSize:11, color:'rgba(74,74,74,0.65)', margin:'-4px 0 12px' }}>
+          No data for {MON[m]} {y - 1} yet — showing {MON[m]} {y} on its own.
+        </p>
+      )}
+
+      <div style={{ display:'flex', gap:24, flexWrap:'wrap', alignItems:'flex-start' }}>
+        <div style={{ flex:'1 1 420px', overflowX:'auto', background:D.card, border:`1px solid ${D.border}`, borderRadius:7 }}>
+          <table style={{ width:'100%', borderCollapse:'collapse' }}>
+            <thead>
+              <tr>
+                <th style={th(false)}>Metric</th>
+                <th style={th(true)}>{MON[m]} {y - 1}</th>
+                <th style={th(true)}>{MON[m]} {y}</th>
+                <th style={th(true)}>Change</th>
+                <th style={th(true)}>%</th>
+              </tr>
+            </thead>
+            <tbody>
+              {metrics.map(({ label, cur: c, prev: p, goodUp, isPct }) => {
+                const has = p != null && c != null
+                const d = has ? c - p : null
+                return (
+                  <tr key={label} style={{ borderBottom:`1px solid ${D.border}` }}>
+                    <td style={{ ...td, textAlign:'left', fontWeight:500, color:D.navy }}>{label}</td>
+                    <td style={td}>{p != null ? (isPct ? fmtPct(p) : fmt(p)) : '—'}</td>
+                    <td style={td}>{c != null ? (isPct ? fmtPct(c) : fmt(c)) : '—'}</td>
+                    <td style={{ ...td, fontWeight:600, color: d != null ? deltaColor(d, goodUp) : '#9ca3af' }}>
+                      {d != null ? (isPct ? `${d >= 0 ? '+' : ''}${d.toFixed(1)} pp` : `${d >= 0 ? '+' : '−'}${fmt(Math.abs(d))}`) : '—'}
+                    </td>
+                    <td style={{ ...td, color: d != null ? deltaColor(d, goodUp) : '#9ca3af' }}>
+                      {has && !isPct && p !== 0 ? `${d >= 0 ? '+' : ''}${(d / Math.abs(p) * 100).toFixed(1)}%` : '—'}
+                    </td>
+                  </tr>
+                )
+              })}
+            </tbody>
+          </table>
+        </div>
+
+        {prev && catChanges.length > 0 && (
+          <div style={{ flex:'1 1 340px' }}>
+            <div style={{ overflowX:'auto', background:D.card, border:`1px solid ${D.border}`, borderRadius:7 }}>
+              <table style={{ width:'100%', borderCollapse:'collapse' }}>
+                <thead>
+                  <tr>
+                    <th style={th(false)}>Biggest Category Changes</th>
+                    <th style={th(true)}>{MON[m]} {y - 1}</th>
+                    <th style={th(true)}>{MON[m]} {y}</th>
+                    <th style={th(true)}>Δ Profit</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {catChanges.map(r => (
+                    <tr key={r.name} style={{ borderBottom:`1px solid ${D.border}` }}>
+                      <td style={{ ...td, textAlign:'left', maxWidth:200, overflow:'hidden', textOverflow:'ellipsis', whiteSpace:'nowrap' }}>{r.name}</td>
+                      <td style={td}>{fmt(r.prev)}</td>
+                      <td style={td}>{fmt(r.cur)}</td>
+                      <td style={{ ...td, fontWeight:600, color: deltaColor(r.delta, true) }}>
+                        {r.delta >= 0 ? '+' : '−'}{fmt(Math.abs(r.delta))}
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+            <p style={{ fontSize:10, color:'rgba(74,74,74,0.55)', margin:'6px 2px 0', lineHeight:1.5 }}>
+              Δ Profit is each category's effect on net profit vs {MON[m]} {y - 1}: green = more income or less spending, red = the opposite.
+            </p>
+          </div>
+        )}
+      </div>
+    </>
   )
 }
 
