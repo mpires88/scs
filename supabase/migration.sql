@@ -60,6 +60,19 @@ alter table public.square_reports    enable row level security;
 alter table public.client_settings   enable row level security;
 alter table public.inventory_buys    enable row level security;
 
+-- Remove legacy anon-era policies. Policies are permissive (OR'd together),
+-- so any surviving anon policy would silently defeat the lockdown below —
+-- the anon key ships in the app bundle and must not reach data.
+drop policy if exists "Users see own client transactions" on public.bank_transactions;
+drop policy if exists "allow_delete"    on public.bank_transactions;
+drop policy if exists "anon can insert" on public.bank_transactions;
+drop policy if exists "anon can select" on public.bank_transactions;
+drop policy if exists "anon can update" on public.bank_transactions;
+drop policy if exists "anon can insert" on public.categories;
+drop policy if exists "anon can select" on public.categories;
+drop policy if exists "anon can update" on public.categories;
+drop policy if exists "anon_all"        on public.square_reports;
+
 drop policy if exists "authenticated full access" on public.bank_transactions;
 create policy "authenticated full access" on public.bank_transactions
   for all to authenticated using (true) with check (true);
