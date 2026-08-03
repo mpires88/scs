@@ -55,9 +55,40 @@ export function parseDate(raw, fmt) {
   return `${y}-${m}-${d}`
 }
 
+// Cleans a raw bank CSV export and parses it. Handles: BOM, metadata preambles
+// (e.g. Freedom Checking) — find the last header row containing both "date" and
+// "description" as whole words ("update" must not match) and strip everything
+// above it — and summary rows whose first field is "Totals" or a date range
+// like "01/01/2024 - 01/31/2024" (must start with a digit — descriptions
+// containing " - " are real data and stay).
+export function parseBankCSV(text) {
+  if (text.charCodeAt(0) === 0xFEFF) text = text.slice(1)
+  const allLines = text.split(/\r?\n/)
+  let txnSectionStart = 0
+  for (let i = 0; i < allLines.length; i++) {
+    const lower = allLines[i].toLowerCase()
+    if (/\bdate\b/.test(lower) && /\bdescription\b/.test(lower)) txnSectionStart = i
+  }
+  if (txnSectionStart > 0) text = allLines.slice(txnSectionStart).join('\n')
+
+  const raw = parseCSVText(text)
+  if (!raw.headers.length) return { headers: [], rows: [], skipped: 0 }
+  const rows = raw.rows.filter(r => {
+    const firstVal = (Object.values(r)[0] || '').trim()
+    return firstVal.toLowerCase() !== 'totals' && !/^\d[\d/.-]*\s+-\s+\d/.test(firstVal)
+  })
+  return { headers: raw.headers, rows, skipped: raw.rows.length - rows.length }
+}
+
 export function fingerprint(row) {
-  if (row.reference_id) return `ref:${row.reference_id}`
-  return `${row.transaction_date}|${row.amount}|${(row.description || '').toLowerCase().trim()}`
+  if (row.reference_id) return `ref:${String(row.reference_id).trim()}`
+  const amt = Number(row.amount)
+  // toFixed(2) matches the DB's rounding: split debit/credit imports compute
+  // credit − debit, whose float artifacts (13.809999…) must fingerprint equal
+  // to the 13.81 the DB stores. The zero guard avoids (-0).toFixed → "-0.00".
+  const amtKey = Number.isFinite(amt) ? (amt === 0 ? 0 : amt).toFixed(2) : 'NaN'
+  const desc = (row.description || '').toLowerCase().replace(/\s+/g, ' ').trim()
+  return `${row.transaction_date}|${amtKey}|${desc}`
 }
 
 export const STANDARD_FIELDS = [
