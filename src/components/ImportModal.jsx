@@ -612,7 +612,7 @@ const m = {
   expandBtn:  { background: 'none', border: 'none', cursor: 'pointer', color: '#9ca3af', fontSize: 10, padding: '2px 5px', lineHeight: 1 },
   unbundleBtn:{ fontSize: 11, padding: '1px 5px', background: 'none', border: `1px solid ${T.border}`, borderRadius: 3, cursor: 'pointer', color: '#6b7280', lineHeight: 1.4 },
   dropzone:   { border: `2px dashed ${T.border}`, borderRadius: 8, padding: '52px 24px', textAlign: 'center', cursor: 'pointer', background: T.page, userSelect: 'none', transition: 'border-color .2s, background .2s' },
-  dropzoneOn: { borderColor: T.navy, background: '#EBF1F7' },
+  dropzoneOn: { border: `2px dashed ${T.navy}`, background: '#EBF1F7' },
   spinner:    { display: 'inline-block', width: 28, height: 28, border: `2px solid ${T.border}`, borderTopColor: T.navy, borderRadius: '50%', animation: 'spin .7s linear infinite' },
   errBox:     { background: '#FDE8E8', border: '1px solid #F5C2C2', borderRadius: 6, padding: '10px 14px', fontSize: 11, color: '#991B1B', marginBottom: 14 },
   instrWrap:  { marginTop: 14, border: `1px solid ${T.border}`, borderRadius: 6, overflow: 'hidden' },

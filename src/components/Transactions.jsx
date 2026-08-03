@@ -841,7 +841,7 @@ const s = {
   input:       { padding: '5px 9px', border: `1px solid ${T.border}`, borderRadius: 5, fontSize: 11, color: T.charcoal, background: '#fff', outline: 'none' },
   tabs:        { display: 'flex', gap: 2 },
   tab:         { padding: '5px 12px', border: `1px solid ${T.border}`, borderRadius: 5, background: '#fff', fontSize: 11, color: T.charcoal, cursor: 'pointer', fontWeight: 400 },
-  tabActive:   { background: T.navy, color: '#fff', borderColor: T.navy, fontWeight: 500 },
+  tabActive:   { background: T.navy, color: '#fff', border: `1px solid ${T.navy}`, fontWeight: 500 },
   fuzzyLabel:  { display: 'flex', alignItems: 'center', gap: 6, fontSize: 11, color: T.charcoal, cursor: 'pointer', userSelect: 'none' },
   bulkBar:     { display: 'flex', gap: 8, alignItems: 'center', background: '#EBF1F7', border: '1px solid #B8CDE0', borderRadius: 6, padding: '8px 12px', marginBottom: 12, flexWrap: 'wrap' },
   table:       { width: '100%', borderCollapse: 'collapse' },
