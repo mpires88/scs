@@ -1,10 +1,13 @@
-import { useState, useEffect, useRef } from 'react'
+import { useState, useEffect, useMemo, useRef } from 'react'
 
 // Dropdown category picker.
 // Props:
 //   categories  — flat string[]  (used when groups is absent)
 //   groups      — [{section, accounts}]  (COA-grouped; shows section headers)
-//   Both still allow free-text entry.
+// Typing stays local until an explicit commit — dropdown click, Enter, or a
+// blur whose text exactly matches a known category. A stray "xyz" abandoned
+// with a click elsewhere reverts instead of becoming a pending assignment.
+// Free text (a category not in the chart of accounts) commits via Enter only.
 export default function CategoryInput({ value, onChange, categories = [], groups = null, placeholder = '— no category —', style = {} }) {
   const [open,  setOpen]  = useState(false)
   const [query, setQuery] = useState(value ?? '')
@@ -18,27 +21,46 @@ export default function CategoryInput({ value, onChange, categories = [], groups
     setQuery(value ?? '')
   }
 
+  const allNames = useMemo(
+    () => (groups ? groups.flatMap(g => g.accounts) : categories),
+    [groups, categories]
+  )
+
   // Build display items: either flat or grouped
   const displayItems = buildDisplayItems(groups, categories, query)
 
-  const select = cat => {
+  const commit = cat => {
     setQuery(cat)
-    onChange(cat)
+    setOpen(false)
+    if (cat !== (value ?? '')) onChange(cat)
+  }
+
+  const revert = () => {
+    setQuery(value ?? '')
     setOpen(false)
   }
 
   const handleChange = e => {
     setQuery(e.target.value)
-    onChange(e.target.value)
     setOpen(true)
   }
 
   const handleKeyDown = e => {
-    if (e.key === 'Escape') setOpen(false)
+    if (e.key === 'Escape') revert()
     if (e.key === 'Enter') {
-      const firstAccount = displayItems.find(x => x.type === 'account')
-      if (firstAccount) select(firstAccount.name)
+      const q = query.trim()
+      // Empty Enter means "clear", not "pick the first of every category"
+      const firstAccount = q ? displayItems.find(x => x.type === 'account') : null
+      commit(firstAccount ? firstAccount.name : q)
     }
+  }
+
+  const handleBlur = () => {
+    const q = query.trim()
+    if (q === (value ?? '')) return
+    const match = allNames.find(n => n.toLowerCase() === q.toLowerCase())
+    if (match) commit(match)
+    else revert()
   }
 
   const hasItems = displayItems.some(x => x.type === 'account')
@@ -57,6 +79,7 @@ export default function CategoryInput({ value, onChange, categories = [], groups
         onChange={handleChange}
         onFocus={() => setOpen(true)}
         onKeyDown={handleKeyDown}
+        onBlur={handleBlur}
         placeholder={placeholder}
         autoComplete="off"
       />
@@ -70,7 +93,7 @@ export default function CategoryInput({ value, onChange, categories = [], groups
               <div
                 key={item.name}
                 style={acct}
-                onMouseDown={() => select(item.name)}
+                onMouseDown={() => commit(item.name)}
                 onMouseEnter={e => e.currentTarget.style.background = '#f3f4f6'}
                 onMouseLeave={e => e.currentTarget.style.background = 'transparent'}
               >

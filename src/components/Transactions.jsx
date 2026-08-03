@@ -1,18 +1,41 @@
-import { useState, useEffect, useMemo, useCallback, Fragment } from 'react'
+import { useState, useEffect, useMemo, useCallback, useRef, Fragment } from 'react'
 import { supabase } from '../lib/supabase'
 import { normKey, buildCatIndex, suggestCat, clusterGroups } from '../lib/merchantClustering'
+import { groupStatus, buildDescCatMap } from '../lib/categorize'
 import { ALL_SECTIONS, fetchAccounts } from '../lib/chartOfAccounts'
+import { getSetting, setSetting } from '../lib/settings'
+import { useUnsavedChanges } from '../lib/unsavedChanges'
 import CategoryInput from './CategoryInput'
 import ImportModal from './ImportModal'
 import { T } from '../lib/theme'
 
-function dominantCat(txns) {
-  const counts = {}
-  txns.forEach(t => { const c = t.category || ''; if (c) counts[c] = (counts[c] || 0) + 1 })
-  return Object.entries(counts).sort((a, b) => b[1] - a[1])[0]?.[0] ?? ''
+const PAGE_SIZE = 50
+const REVIEW_STATE_KEY = 'txn_review_state'
+
+// Effective category of a transaction under a pending-assignments map.
+// All review state anchors to transaction IDs; group keys are display-only.
+const effCat = (assignments, t) => (t.id in assignments ? assignments[t.id] : (t.category || ''))
+
+// Stable serialization of the persisted review state, used both to store it
+// and to detect real changes (so the debounced write doesn't fire on no-ops).
+const reviewJson = (separated, rejected) =>
+  JSON.stringify({ separated: [...separated].sort(), rejected: [...rejected].sort() })
+
+const keepIds = (set, idSet) => {
+  const next = new Set([...set].filter(id => idSet.has(id)))
+  return next.size === set.size ? set : next
 }
 
-const PAGE_SIZE = 50
+const dropIds = (set, idSet) => {
+  const next = new Set([...set].filter(id => !idSet.has(id)))
+  return next.size === set.size ? set : next
+}
+
+function mixedTitle(g, catOf) {
+  const counts = {}
+  g.txns.forEach(t => { const c = catOf(t) || '(uncategorized)'; counts[c] = (counts[c] || 0) + 1 })
+  return Object.entries(counts).sort((a, b) => b[1] - a[1]).map(([c, n]) => `${c}: ${n}`).join('\n')
+}
 
 // ─── Transactions Page ────────────────────────────────────────────────────────
 
@@ -21,8 +44,8 @@ export default function Transactions({ clientId = null }) {
   const [loading,     setLoading]     = useState(true)
   const [loadError,   setLoadError]   = useState(null)
   const [accounts,    setAccounts]    = useState([])
-  const [assignments, setAssignments] = useState({})    // groupKey → category string
-  const [rejected,    setRejected]    = useState({})    // groupKey → true (suggestion dismissed)
+  const [assignments, setAssignments] = useState({})    // txnId → category ('' = clear)
+  const [rejected,    setRejected]    = useState(new Set()) // txn IDs whose suggestion was dismissed
   const [separated,   setSeparated]   = useState(new Set()) // txn IDs given their own group
   const [fuzzy,       setFuzzy]       = useState(true)
   const [search,      setSearch]      = useState('')
@@ -35,6 +58,10 @@ export default function Transactions({ clientId = null }) {
   const [savedMsg,    setSavedMsg]    = useState('')
   const [showImport,  setShowImport]  = useState(false)
   const [loadingMore, setLoadingMore] = useState(false)
+
+  const { setDirty } = useUnsavedChanges()
+  const hydratedRef  = useRef(false) // gates the persist effect until load() has applied stored state
+  const lastSavedRef = useRef('')
 
   const allCats = useMemo(() => accounts.map(a => a.name), [accounts])
 
@@ -66,50 +93,88 @@ export default function Transactions({ clientId = null }) {
         .order('transaction_date')
         .order('id')
 
-      const [firstRes, coaRes] = await Promise.all([
+      const [firstRes, coaRes, reviewState] = await Promise.all([
         base().range(0, 999),
         fetchAccounts(clientId),
+        getSetting(clientId, REVIEW_STATE_KEY, null).catch(() => null),
       ])
       if (firstRes.error) throw firstRes.error
 
       const first = firstRes.data ?? []
       setAccounts(coaRes.accounts)
+      const loadedSep = new Set(reviewState?.separated ?? [])
+      const loadedRej = new Set(reviewState?.rejected ?? [])
+      setSeparated(loadedSep)
+      setRejected(loadedRej)
+      lastSavedRef.current = reviewJson(loadedSep, loadedRej)
       setTxns(first)     // show data immediately
       setLoading(false)  // spinner off — UI is usable now
 
       // If we got a full page, quietly fetch the rest
+      let all = first
       if (first.length === 1000) {
         setLoadingMore(true)
-        let all = first, offset = 1000
+        let offset = 1000
         while (true) {
           const res = await base().range(offset, offset + 999)
-          if (res.error || !res.data?.length) break
+          // A failed page must surface, not silently truncate — loadingMore is
+          // the gate that keeps Import from deduping against a partial list.
+          if (res.error) throw new Error(`Could not load all transactions (stopped at ${all.length}): ${res.error.message}`)
+          if (!res.data?.length) break
           all = [...all, ...res.data]
-          setTxns(all)
           if (res.data.length < 1000) break
           offset += 1000
         }
+        // Single commit — one regroup/recluster instead of one per page.
+        // Merged by id so a save completed while paging keeps its categories
+        // (pages fetched before the save hold pre-save values).
+        setTxns(prev => {
+          const local = new Map(prev.map(t => [t.id, t]))
+          return all.map(t => {
+            const l = local.get(t.id)
+            return l && (l.category || '') !== (t.category || '') ? { ...t, category: l.category } : t
+          })
+        })
         setLoadingMore(false)
       }
+
+      // Prune persisted review state — only against the fully loaded list,
+      // never the first page, or valid IDs would be discarded.
+      const idSet = new Set(all.map(t => t.id))
+      setSeparated(prev => keepIds(prev, idSet))
+      setRejected(prev => keepIds(prev, idSet))
+      hydratedRef.current = true
     } catch (e) {
       setLoadError(e.message)
       setLoading(false)
+      setLoadingMore(false)
     }
   }, [clientId])
 
   useEffect(() => { load() }, [load])
 
+  // Persist separated/rejected (debounced, change-detected). Best-effort: a
+  // failed write leaves the in-session state intact and retries on next change.
+  useEffect(() => {
+    if (!hydratedRef.current) return
+    const json = reviewJson(separated, rejected)
+    if (json === lastSavedRef.current) return
+    const h = setTimeout(() => {
+      lastSavedRef.current = json
+      setSetting(clientId, REVIEW_STATE_KEY, JSON.parse(json)).catch(() => {})
+    }, 800)
+    return () => clearTimeout(h)
+  }, [separated, rejected, clientId])
+
   // ── Grouping ───────────────────────────────────────────────────────────────
 
+  const txnById = useMemo(() => new Map(txns.map(t => [t.id, t])), [txns])
+
+  const catOf = useCallback(t => effCat(assignments, t), [assignments])
+
   const groups = useMemo(() => {
-    // Build suggestion index from categorized transactions
-    const descCatMap = {}
-    txns.forEach(t => {
-      if (t.category) {
-        const k = normKey(t.description)
-        if (k && !descCatMap[k]) descCatMap[k] = t.category
-      }
-    })
+    // Suggestion index: most common category per normalized description
+    const descCatMap = buildDescCatMap(txns)
     const catIndex = buildCatIndex(descCatMap)
 
     // Separate pinned transactions
@@ -127,9 +192,11 @@ export default function Transactions({ clientId = null }) {
       groupMap[key].total += Number(t.amount) || 0
     })
 
-    // Attach suggestions only to uncategorized groups
+    // Attach suggestions to any group with uncategorized transactions — a
+    // partially categorized group gets its gaps suggested too (usually from
+    // its own categorized rows, which score highest in the index).
     Object.values(groupMap).forEach(g => {
-      if (!dominantCat(g.txns)) g.suggestedCat = suggestCat(g.key, catIndex)
+      if (g.txns.some(t => !t.category)) g.suggestedCat = suggestCat(g.key, catIndex)
     })
 
     const rawGroups = Object.values(groupMap).sort((a, b) => a.key.localeCompare(b.key))
@@ -150,34 +217,48 @@ export default function Transactions({ clientId = null }) {
     return [...mainGroups, ...sepGroups]
   }, [txns, fuzzy, separated])
 
-  // Assignments whose group key no longer exists (fuzzy toggle or separation
-  // regrouped things) are excluded, so the pending count and Save stay honest.
-  const validAssignments = useMemo(() => {
-    const keys = new Set(groups.map(g => g.key))
-    const entries = Object.entries(assignments).filter(([k]) => keys.has(k))
-    return entries.length === Object.keys(assignments).length
-      ? assignments
-      : Object.fromEntries(entries)
-  }, [groups, assignments])
+  const statusByKey = useMemo(() => {
+    const m = new Map()
+    groups.forEach(g => m.set(g.key, groupStatus(g.txns, catOf)))
+    return m
+  }, [groups, catOf])
 
   // ── Helpers ────────────────────────────────────────────────────────────────
 
-  const effectiveCat = useCallback(
-    g => (g.key in assignments ? assignments[g.key] : dominantCat(g.txns)),
-    [assignments]
-  )
-
   const hasSugg = useCallback(
-    g => !!g.suggestedCat && !rejected[g.key] && !(g.key in assignments) && !dominantCat(g.txns),
-    [rejected, assignments]
+    g => !!g.suggestedCat && g.txns.some(t => !catOf(t) && !rejected.has(t.id)),
+    [catOf, rejected]
   )
 
-  const acceptSuggestion = g => {
-    setAssignments(p => ({ ...p, [g.key]: g.suggestedCat }))
+  // Explicit edit on a group row: overwrites every transaction in the group.
+  // The partial/mixed badges make the blast radius visible before committing.
+  const assignGroup = (g, cat) => {
+    setAssignments(p => {
+      const next = { ...p }
+      g.txns.forEach(t => { next[t.id] = cat })
+      return next
+    })
     setSavedMsg('')
   }
 
-  const rejectSuggestion = g => setRejected(p => ({ ...p, [g.key]: true }))
+  // Accepting a suggestion fills only uncategorized transactions — an
+  // automated action never overwrites work a human already did.
+  const acceptSuggestion = g => {
+    setAssignments(p => {
+      const next = { ...p }
+      g.txns.forEach(t => { if (!effCat(p, t)) next[t.id] = g.suggestedCat })
+      return next
+    })
+    setSavedMsg('')
+  }
+
+  const rejectSuggestion = g => {
+    setRejected(prev => {
+      const next = new Set(prev)
+      g.txns.forEach(t => { if (!catOf(t)) next.add(t.id) })
+      return next
+    })
+  }
 
   // Separating/rejoining regenerates group keys, so drop the selection with it
   const separateTxn = id => { setSeparated(prev => new Set([...prev, id])); setSelected(new Set()) }
@@ -185,28 +266,58 @@ export default function Transactions({ clientId = null }) {
 
   // ── Filter + pagination ────────────────────────────────────────────────────
 
-  useEffect(() => setPage(0), [search, filter, fuzzy])
+  // Selection is keyed by group key, so it must not survive anything that
+  // regroups; it deliberately does survive page changes.
+  useEffect(() => { setPage(0); setSelected(new Set()) }, [search, filter, fuzzy])
 
   const visibleGroups = useMemo(() => {
     const q = search.toLowerCase()
     return groups.filter(g => {
       if (q && !g.key.includes(q) && !g.displayDesc.toLowerCase().includes(q)) return false
-      const cat = effectiveCat(g)
-      if (filter === 'uncategorized' && cat)         return false
-      if (filter === 'categorized'   && !cat)        return false
-      if (filter === 'suggestions'   && !hasSugg(g)) return false
+      const st = statusByKey.get(g.key)
+      if (filter === 'uncategorized' && st.uncategorized === 0) return false
+      if (filter === 'categorized'   && st.uncategorized > 0)   return false
+      if (filter === 'mixed'         && st.kind !== 'mixed')    return false
+      if (filter === 'suggestions'   && !hasSugg(g))            return false
       return true
     })
-  }, [groups, search, filter, effectiveCat, hasSugg])
+  }, [groups, search, filter, statusByKey, hasSugg])
 
   const pageCount  = Math.ceil(visibleGroups.length / PAGE_SIZE)
   const pageGroups = visibleGroups.slice(page * PAGE_SIZE, (page + 1) * PAGE_SIZE)
 
-  // ── Stats ──────────────────────────────────────────────────────────────────
+  // ── Stats (transaction-based, not group-based) ─────────────────────────────
 
-  const uncatCount   = useMemo(() => groups.filter(g => !effectiveCat(g)).length, [groups, effectiveCat])
-  const suggCount    = useMemo(() => groups.filter(g => hasSugg(g)).length, [groups, hasSugg])
-  const pendingCount = Object.keys(validAssignments).length
+  const uncatTxnCount = useMemo(() => txns.filter(t => !catOf(t)).length, [txns, catOf])
+  const suggCount     = useMemo(() => groups.filter(g => hasSugg(g)).length, [groups, hasSugg])
+  const mixedCount    = useMemo(
+    () => groups.filter(g => statusByKey.get(g.key)?.kind === 'mixed').length,
+    [groups, statusByKey]
+  )
+  const pendingTxnCount = useMemo(() => {
+    let n = 0
+    for (const [id, cat] of Object.entries(assignments)) {
+      const t = txnById.get(id)
+      if (t && (cat || '') !== (t.category || '')) n++
+    }
+    return n
+  }, [assignments, txnById])
+
+  // ── Unsaved-changes guards ─────────────────────────────────────────────────
+
+  const hasPending = pendingTxnCount > 0
+
+  useEffect(() => {
+    setDirty(hasPending)
+    return () => setDirty(false)
+  }, [hasPending, setDirty])
+
+  useEffect(() => {
+    if (!hasPending) return
+    const h = e => { e.preventDefault(); e.returnValue = '' }
+    window.addEventListener('beforeunload', h)
+    return () => window.removeEventListener('beforeunload', h)
+  }, [hasPending])
 
   // ── Upload coverage ────────────────────────────────────────────────────────
 
@@ -239,6 +350,14 @@ export default function Transactions({ clientId = null }) {
       }
       const idSet = new Set(ids)
       setTxns(prev => prev.filter(t => !idSet.has(t.id)))
+      setAssignments(prev => {
+        const next = { ...prev }
+        let changed = false
+        idSet.forEach(id => { if (id in next) { delete next[id]; changed = true } })
+        return changed ? next : prev
+      })
+      setRejected(prev => dropIds(prev, idSet))
+      setSeparated(prev => dropIds(prev, idSet))
       setSelected(new Set())
       setSavedMsg(`✓ Deleted ${ids.length} transaction${ids.length !== 1 ? 's' : ''}`)
     } catch (e) { alert('Delete failed: ' + e.message) }
@@ -254,6 +373,7 @@ export default function Transactions({ clientId = null }) {
       const { error } = await supabase.from('bank_transactions').delete().eq('client_id', clientId)
       if (error) throw error
       setTxns([]); setAssignments({}); setSelected(new Set())
+      setRejected(new Set()); setSeparated(new Set())
       setSavedMsg('✓ All transactions deleted')
     } catch (e) { alert('Delete failed: ' + e.message) }
     finally { setSaving(false) }
@@ -262,13 +382,25 @@ export default function Transactions({ clientId = null }) {
   // ── Save ───────────────────────────────────────────────────────────────────
 
   const doSave = async () => {
+    // Only writes that change something; re-picking the saved value is a no-op.
+    const idToCat = {}
+    for (const [id, cat] of Object.entries(assignments)) {
+      const t = txnById.get(id)
+      if (!t) continue
+      if ((cat || '') === (t.category || '')) continue
+      idToCat[id] = cat || null
+    }
+    if (!Object.keys(idToCat).length) return
+
+    // Free text is allowed (the chart of accounts is user-managed) but typos
+    // shouldn't slip into the books silently.
+    const unknown = [...new Set(Object.values(idToCat).filter(c => c && !allCats.includes(c)))]
+    if (unknown.length && !confirm(
+      `${unknown.length === 1 ? 'This category is' : 'These categories are'} not in your chart of accounts:\n\n${unknown.join('\n')}\n\nSave anyway?`
+    )) return
+
     setSaving(true); setSavedMsg('')
     try {
-      const idToCat = {}
-      for (const [key, cat] of Object.entries(validAssignments)) {
-        const g = groups.find(g => g.key === key)
-        if (g) g.txns.forEach(t => { idToCat[t.id] = cat || null })
-      }
       const byCat = {}
       for (const [id, cat] of Object.entries(idToCat)) {
         const k = cat ?? '__null__'
@@ -297,9 +429,15 @@ export default function Transactions({ clientId = null }) {
   }
 
   const acceptAll = () => {
-    const next = { ...validAssignments }
-    groups.forEach(g => { if (hasSugg(g)) next[g.key] = g.suggestedCat })
-    setAssignments(next)
+    setAssignments(p => {
+      const next = { ...p }
+      groups.forEach(g => {
+        if (!hasSugg(g)) return
+        g.txns.forEach(t => { if (!effCat(p, t)) next[t.id] = g.suggestedCat })
+      })
+      return next
+    })
+    setSavedMsg('')
   }
 
   // ── Bulk select ────────────────────────────────────────────────────────────
@@ -309,11 +447,31 @@ export default function Transactions({ clientId = null }) {
     if (allPageSel) setSelected(p => { const n = new Set(p); pageGroups.forEach(g => n.delete(g.key)); return n })
     else            setSelected(p => { const n = new Set(p); pageGroups.forEach(g => n.add(g.key));    return n })
   }
+
+  const selectedGroups = () => [...selected].map(k => groups.find(g => g.key === k)).filter(Boolean)
+
   const applyBulk = () => {
-    if (!selected.size) return
-    const next = { ...validAssignments }
-    selected.forEach(k => { next[k] = bulkCat })
-    setAssignments(next); setSelected(new Set()); setBulkCat('')
+    const cat = bulkCat.trim()
+    if (!selected.size || !cat) return
+    setAssignments(p => {
+      const next = { ...p }
+      selectedGroups().forEach(g => g.txns.forEach(t => { next[t.id] = cat }))
+      return next
+    })
+    setSelected(new Set()); setBulkCat(''); setSavedMsg('')
+  }
+
+  const clearBulkCats = () => {
+    const gs = selectedGroups()
+    const txCount = gs.reduce((s, g) => s + g.txns.length, 0)
+    if (!txCount) return
+    if (!confirm(`Clear the category on ${txCount} transaction${txCount !== 1 ? 's' : ''} across ${gs.length} group${gs.length !== 1 ? 's' : ''}?`)) return
+    setAssignments(p => {
+      const next = { ...p }
+      gs.forEach(g => g.txns.forEach(t => { next[t.id] = '' }))
+      return next
+    })
+    setSelected(new Set()); setSavedMsg('')
   }
 
   // ── Render ─────────────────────────────────────────────────────────────────
@@ -341,14 +499,14 @@ export default function Transactions({ clientId = null }) {
           <p style={s.sub}>
             {groups.length} merchant groups · {txns.length} transactions
             {loadingMore && <> · <span style={{ color: T.charcoal, opacity: .6 }}>loading more…</span></>}
-            {uncatCount > 0 && <> · <span style={{ color: T.amber, fontWeight: 500 }}>{uncatCount} uncategorized</span></>}
+            {uncatTxnCount > 0 && <> · <span style={{ color: T.amber, fontWeight: 500 }}>{uncatTxnCount} transaction{uncatTxnCount !== 1 ? 's' : ''} uncategorized</span></>}
             {suggCount  > 0 && <> · <span style={{ color: T.gold, fontWeight: 500 }}>{suggCount} suggestions</span></>}
           </p>
         </div>
         <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
           {savedMsg && <span style={s.savedMsg}>{savedMsg}</span>}
           {suggCount > 0 && (
-            <button style={s.btnOutline} onClick={acceptAll}>Accept all ({suggCount})</button>
+            <button style={s.btnOutline} onClick={acceptAll} title="Fills uncategorized transactions only — never overwrites an existing category">Accept all ({suggCount})</button>
           )}
           {txns.length > 0 && (
             <button style={s.btnDanger} disabled={saving} onClick={deleteAll}>Delete All</button>
@@ -360,11 +518,11 @@ export default function Transactions({ clientId = null }) {
             onClick={() => setShowImport(true)}
           >↑ Import CSV</button>
           <button
-            style={{ ...s.btnPrimary, ...(pendingCount === 0 || saving ? s.btnDisabled : {}) }}
-            disabled={pendingCount === 0 || saving}
+            style={{ ...s.btnPrimary, ...(pendingTxnCount === 0 || saving ? s.btnDisabled : {}) }}
+            disabled={pendingTxnCount === 0 || saving}
             onClick={doSave}
           >
-            {saving ? 'Saving…' : pendingCount > 0 ? `Save (${pendingCount})` : 'Save'}
+            {saving ? 'Saving…' : pendingTxnCount > 0 ? `Save (${pendingTxnCount})` : 'Save'}
           </button>
         </div>
       </header>
@@ -386,6 +544,7 @@ export default function Transactions({ clientId = null }) {
             ['all',           'All'],
             ['suggestions',   `Suggestions${suggCount > 0 ? ` (${suggCount})` : ''}`],
             ['uncategorized', 'Uncategorized'],
+            ['mixed',         `Mixed${mixedCount > 0 ? ` (${mixedCount})` : ''}`],
             ['categorized',   'Categorized'],
           ].map(([val, label]) => (
             <button key={val}
@@ -395,7 +554,7 @@ export default function Transactions({ clientId = null }) {
           ))}
         </div>
         <label style={s.fuzzyLabel}>
-          <input type="checkbox" checked={fuzzy} onChange={e => { setFuzzy(e.target.checked); setSelected(new Set()) }} />
+          <input type="checkbox" checked={fuzzy} onChange={e => setFuzzy(e.target.checked)} />
           Group similar merchants
         </label>
       </div>
@@ -412,8 +571,13 @@ export default function Transactions({ clientId = null }) {
             placeholder="Category…"
           />
           <datalist id="bulk-cats">{allCats.map(c => <option key={c} value={c} />)}</datalist>
-          <button style={s.btnPrimary} onClick={applyBulk}>Apply</button>
-          <button style={s.btnSecondary} onClick={() => setSelected(new Set())}>Clear</button>
+          <button
+            style={{ ...s.btnPrimary, ...(!bulkCat.trim() ? s.btnDisabled : {}) }}
+            disabled={!bulkCat.trim()}
+            onClick={applyBulk}
+          >Apply</button>
+          <button style={s.btnSecondary} onClick={clearBulkCats}>Clear categories</button>
+          <button style={s.btnSecondary} onClick={() => setSelected(new Set())}>Clear selection</button>
           <button style={s.btnDanger} disabled={saving} onClick={deleteSelected}>Delete selected</button>
         </div>
       )}
@@ -441,10 +605,12 @@ export default function Transactions({ clientId = null }) {
               </thead>
               <tbody>
                 {pageGroups.map((g, i) => {
-                  const cat     = effectiveCat(g)
-                  const isDirty = g.key in assignments
+                  const st      = statusByKey.get(g.key)
+                  const cat     = st.kind === 'mixed' ? '' : ([...st.distinct][0] || '')
+                  const isDirty = g.txns.some(t => t.id in assignments && (assignments[t.id] || '') !== (t.category || ''))
                   const sugg    = hasSugg(g)
                   const isExp   = !!expanded[g.key]
+                  const unknownCat = cat && !allCats.includes(cat)
 
                   return (
                     <Fragment key={g.key}>
@@ -473,6 +639,16 @@ export default function Transactions({ clientId = null }) {
                                 +{g.variants.length} similar
                               </span>
                             )}
+                            {st.kind === 'partial' && (
+                              <span style={s.warnBadge} title="Expand the row to see which transactions differ">
+                                {st.uncategorized} of {g.txns.length} uncategorized
+                              </span>
+                            )}
+                            {st.kind === 'mixed' && (
+                              <span style={s.warnBadge} title={mixedTitle(g, catOf)}>
+                                {st.distinct.size} categories{st.uncategorized > 0 ? ` · ${st.uncategorized} uncategorized` : ''}
+                              </span>
+                            )}
                           </div>
                         </td>
 
@@ -481,16 +657,19 @@ export default function Transactions({ clientId = null }) {
                             <div style={s.suggRow}>
                               <span style={s.suggDot} />
                               <span style={s.suggLabel}>Suggested: {g.suggestedCat}</span>
-                              <button style={s.acceptBtn} onClick={() => acceptSuggestion(g)} title="Accept">✓</button>
+                              <button style={s.acceptBtn} onClick={() => acceptSuggestion(g)} title="Accept — fills uncategorized transactions only">✓</button>
                               <button style={s.rejectBtn} onClick={() => rejectSuggestion(g)} title="Dismiss">✕</button>
                             </div>
                           )}
                           <CategoryInput
                             value={cat}
-                            onChange={val => { setAssignments(p => ({ ...p, [g.key]: val })); setSavedMsg('') }}
+                            onChange={val => assignGroup(g, val)}
                             categories={allCats}
                             groups={groupedCats}
-                            style={isDirty ? { border: '1px solid #3b82f6', boxShadow: '0 0 0 2px #bfdbfe' } : {}}
+                            placeholder={st.kind === 'mixed' ? '— mixed categories —' : undefined}
+                            style={unknownCat
+                              ? { border: '1px solid #d97706', boxShadow: '0 0 0 2px #FDE68A' }
+                              : isDirty ? { border: '1px solid #3b82f6', boxShadow: '0 0 0 2px #bfdbfe' } : {}}
                           />
                           {g.txns.length > 1 && (
                             <div style={{ fontSize: 10, color: '#9ca3af', marginTop: 3 }}>
@@ -525,7 +704,7 @@ export default function Transactions({ clientId = null }) {
                               <table style={s.table}>
                                 <thead>
                                   <tr>
-                                    {['Date', 'Description', 'Amount', 'Account', ''].map(h => (
+                                    {['Date', 'Description', 'Amount', 'Category', 'Account', ''].map(h => (
                                       <th key={h} style={{ ...s.th, background: '#D8E4EF', padding: '5px 8px' }}>{h}</th>
                                     ))}
                                   </tr>
@@ -537,6 +716,10 @@ export default function Transactions({ clientId = null }) {
                                       <td style={{ ...s.td, padding: '4px 8px', maxWidth: 300, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{t.description}</td>
                                       <td style={{ ...s.td, padding: '4px 8px', textAlign: 'right', fontVariantNumeric: 'tabular-nums', color: Number(t.amount) < 0 ? '#dc2626' : '#16a34a' }}>
                                         {Number(t.amount).toFixed(2)}
+                                      </td>
+                                      <td style={{ ...s.td, padding: '4px 8px', color: catOf(t) ? T.charcoal : '#d97706', fontStyle: catOf(t) ? 'normal' : 'italic' }}>
+                                        {catOf(t) || 'uncategorized'}
+                                        {t.id in assignments && (assignments[t.id] || '') !== (t.category || '') && <span style={{ ...s.dirtyDot, marginLeft: 5 }} title="Unsaved change" />}
                                       </td>
                                       <td style={{ ...s.td, padding: '4px 8px' }}>{t.account || '—'}</td>
                                       <td style={{ ...s.td, padding: '4px 8px', whiteSpace: 'nowrap' }}>
@@ -550,7 +733,7 @@ export default function Transactions({ clientId = null }) {
                                   ))}
                                   {g.txns.length > 25 && (
                                     <tr>
-                                      <td colSpan={5} style={{ padding: '4px 8px', color: '#9ca3af' }}>
+                                      <td colSpan={6} style={{ padding: '4px 8px', color: '#9ca3af' }}>
                                         …and {g.txns.length - 25} more
                                       </td>
                                     </tr>
@@ -667,6 +850,7 @@ const s = {
   dirtyDot:    { flexShrink: 0, width: 6, height: 6, borderRadius: '50%', background: T.navy, display: 'inline-block' },
   sepTag:      { flexShrink: 0, fontSize: 9.5, color: '#9ca3af', background: T.page, border: `1px solid ${T.border}`, borderRadius: 3, padding: '1px 5px' },
   badge:       { flexShrink: 0, fontSize: 10, fontWeight: 500, color: '#4A7BA7', background: '#E8EFF5', borderRadius: 3, padding: '1px 6px', whiteSpace: 'nowrap', cursor: 'default' },
+  warnBadge:   { flexShrink: 0, fontSize: 10, fontWeight: 500, color: '#92400E', background: '#FEF3C7', border: '1px solid #FCD34D', borderRadius: 3, padding: '1px 6px', whiteSpace: 'nowrap', cursor: 'default' },
   suggRow:     { display: 'flex', alignItems: 'center', gap: 5, marginBottom: 4 },
   suggDot:     { flexShrink: 0, width: 6, height: 6, borderRadius: '50%', background: T.gold, display: 'inline-block' },
   suggLabel:   { fontSize: 11, color: T.gold, fontWeight: 500, flex: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' },

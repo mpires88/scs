@@ -2,17 +2,12 @@ import { useState, useEffect, useCallback, useMemo, Fragment, useRef } from 'rea
 import { supabase } from '../lib/supabase'
 import { normKey, buildCatIndex, suggestCat, clusterGroups } from '../lib/merchantClustering'
 import {
-  parseCSVText, parseDate, fingerprint, autoDetectCols,
+  parseBankCSV, parseDate, fingerprint, autoDetectCols,
   DATE_FORMATS, STANDARD_FIELDS, DEFAULT_CFG, loadAllMappings, saveBankMapping,
 } from '../lib/csv'
+import { dominantCat, buildDescCatMap } from '../lib/categorize'
 import CategoryInput from './CategoryInput'
 import { T } from '../lib/theme'
-
-function dominantCat(txns) {
-  const counts = {}
-  txns.forEach(t => { const c = t.category || ''; if (c) counts[c] = (counts[c] || 0) + 1 })
-  return Object.entries(counts).sort((a, b) => b[1] - a[1])[0]?.[0] ?? ''
-}
 
 export default function ImportModal({ clientId, allCats, groupedCats = null, existingTxns, onDone, onClose }) {
   const [step,       setStep]       = useState('upload')
@@ -37,31 +32,8 @@ export default function ImportModal({ clientId, allCats, groupedCats = null, exi
     if (!file.name.toLowerCase().endsWith('.csv')) { setMapError('Please select a .csv file'); return }
     const reader = new FileReader()
     reader.onload = e => {
-      let text = e.target.result.replace(/^\uFEFF/, '')
-
-      // Some bank exports (e.g. Freedom Checking) have a metadata preamble followed by the
-      // real transaction section. Find the last header row that contains both the words
-      // "date" and "description" (whole words — "update" must not match) and strip
-      // everything above it.
-      const allLines = text.split(/\r?\n/)
-      let txnSectionStart = 0
-      for (let i = 0; i < allLines.length; i++) {
-        const lower = allLines[i].toLowerCase()
-        if (/\bdate\b/.test(lower) && /\bdescription\b/.test(lower)) txnSectionStart = i
-      }
-      if (txnSectionStart > 0) text = allLines.slice(txnSectionStart).join('\n')
-
-      const raw = parseCSVText(text)
-      if (!raw.headers.length) { setMapError('Could not parse CSV — no headers found'); return }
-
-      // Drop summary rows: first field is "Totals", or a date range like
-      // "01/01/2024 - 01/31/2024" (must start with a digit — descriptions
-      // containing " - " are real data and stay).
-      const rows = raw.rows.filter(r => {
-        const firstVal = (Object.values(r)[0] || '').trim()
-        return firstVal.toLowerCase() !== 'totals' && !/^\d[\d/.-]*\s+-\s+\d/.test(firstVal)
-      })
-      const data = { headers: raw.headers, rows, skipped: raw.rows.length - rows.length }
+      const data = parseBankCSV(e.target.result)
+      if (!data.headers.length) { setMapError('Could not parse CSV — no headers found'); return }
 
       const { cols, splitAmounts } = autoDetectCols(data.headers)
       const base = DEFAULT_CFG()
@@ -135,15 +107,11 @@ export default function ImportModal({ clientId, allCats, groupedCats = null, exi
         // Count existing occurrences per fingerprint (not just presence) so a
         // second legitimate identical transaction on the same day still imports.
         const existingCount = {}
-        const descCatMap = {}
         existingTxns.forEach(r => {
           const fp = fingerprint(r)
           existingCount[fp] = (existingCount[fp] || 0) + 1
-          if (r.category) {
-            const k = normKey(r.description)
-            if (k && !descCatMap[k]) descCatMap[k] = r.category
-          }
         })
+        const descCatMap = buildDescCatMap(existingTxns)
         if (cancelled) return
 
         const seenCount = {}
