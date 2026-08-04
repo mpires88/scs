@@ -1,31 +1,53 @@
 import { useState, useEffect } from 'react'
-import { supabase } from '../lib/supabase'
+import { supabase, fetchAll } from '../lib/supabase'
 import { BooksGuideContent } from './BooksGuide'
+import FollowTheCase from './FollowTheCase'
 import { T } from '../lib/theme'
 
 // Full-page presentation of the books explainer. The Dashboard drawer shows the
-// same material; this exists so it's reachable from anywhere in the app.
+// written guide; this page leads with the interactive walkthrough, which needs
+// more width than the drawer has.
 //
-// The only thing it fetches is whether COGS has ever been booked — that gates a
-// section of the guide, and a head-count query is cheaper than loading the
-// transaction list just to answer a yes/no.
+// It reads a little live data for two reasons: to decide whether the "you
+// aren't recording COGS" section applies, and to close the walkthrough with the
+// shop's real position instead of a figure that silently goes stale.
 export default function HelpGuide({ clientId }) {
   const [noCogs, setNoCogs] = useState(false)
+  const [stats,  setStats]  = useState(null)
 
   useEffect(() => {
     let cancelled = false
     ;(async () => {
       try {
-        const { data: cogsAccounts } = await supabase.from('categories')
-          .select('name').eq('client_id', clientId).eq('pl_section', 'Cost of Goods Sold')
-        const names = (cogsAccounts ?? []).map(a => a.name)
-        if (!names.length) { if (!cancelled) setNoCogs(true); return }
-        const { count } = await supabase.from('bank_transactions')
-          .select('id', { count: 'exact', head: true })
-          .eq('client_id', clientId).in('category', names)
-        if (!cancelled) setNoCogs((count ?? 0) === 0)
+        const [accts, rows] = await Promise.all([
+          supabase.from('categories').select('name, pl_section').eq('client_id', clientId),
+          fetchAll(() => supabase.from('bank_transactions')
+            .select('transaction_date, amount, category')
+            .eq('client_id', clientId).not('category', 'is', null).neq('category', '')
+            .order('transaction_date').order('id')),
+        ])
+        if (cancelled) return
+
+        const section = new Map((accts.data ?? []).map(a => [a.name, a.pl_section]))
+        const cogsNames = new Set([...section].filter(([, s]) => s === 'Cost of Goods Sold').map(([n]) => n))
+        setNoCogs(!rows.some(t => cogsNames.has(t.category)))
+
+        const years = rows.map(t => +(t.transaction_date || '').slice(0, 4)).filter(Boolean)
+        const year = years.length ? Math.max(...years) : null
+        if (!year) return
+
+        let inventory = 0, buys = 0, revenue = 0
+        rows.forEach(t => {
+          if (+(t.transaction_date || '').slice(0, 4) !== year) return
+          const sec = section.get(t.category)
+          const amt = Number(t.amount) || 0
+          // Money moving onto the shelf: spend booked to a balance-sheet asset.
+          if (sec === 'Current Assets' && amt < 0) { inventory += -amt; buys += 1 }
+          if (sec === 'Revenue') revenue += amt
+        })
+        setStats({ year, inventory, buys, revenue })
       } catch {
-        // The guide reads fine without the contextual section — never block on this.
+        // The guide reads fine without either — never block the page on this.
       }
     })()
     return () => { cancelled = true }
@@ -40,7 +62,8 @@ export default function HelpGuide({ clientId }) {
         </p>
       </header>
 
-      <div style={{ padding: '20px 28px 48px', maxWidth: 760 }}>
+      <div style={{ padding: '20px 28px 48px', maxWidth: 860 }}>
+        <FollowTheCase stats={stats} />
         <BooksGuideContent noCogs={noCogs} />
       </div>
     </div>
