@@ -7,10 +7,20 @@ import { getSetting, setSetting } from '../lib/settings'
 import { useUnsavedChanges } from '../lib/unsavedChanges'
 import CategoryInput from './CategoryInput'
 import ImportModal from './ImportModal'
-import { T } from '../lib/theme'
+import { T, fmt2 } from '../lib/theme'
 
-const PAGE_SIZE = 50
+const PAGE_SIZE = 50        // groups per page (grouped view)
+const FLAT_PAGE_SIZE = 100  // transactions per page (ungrouped view)
 const REVIEW_STATE_KEY = 'txn_review_state'
+
+// Sorting. Text columns read best ascending on first click, dates/numbers
+// descending (newest and largest first), so the initial direction depends on
+// the column rather than always being ascending.
+const TEXT_COLS = new Set(['description', 'category', 'account'])
+const cmp = (a, b) => (a < b ? -1 : a > b ? 1 : 0)
+const nextSort = (prev, col) => prev.col === col
+  ? { col, dir: prev.dir === 'asc' ? 'desc' : 'asc' }
+  : { col, dir: TEXT_COLS.has(col) ? 'asc' : 'desc' }
 
 // Effective category of a transaction under a pending-assignments map.
 // All review state anchors to transaction IDs; group keys are display-only.
@@ -50,6 +60,11 @@ export default function Transactions({ clientId = null }) {
   const [fuzzy,       setFuzzy]       = useState(true)
   const [search,      setSearch]      = useState('')
   const [filter,      setFilter]      = useState('all')
+  const [view,        setView]        = useState('grouped')  // 'grouped' | 'flat'
+  const [dateFrom,    setDateFrom]    = useState('')
+  const [dateTo,      setDateTo]      = useState('')
+  const [sortGrouped, setSortGrouped] = useState({ col: 'description', dir: 'asc'  })
+  const [sortFlat,    setSortFlat]    = useState({ col: 'date',        dir: 'desc' })
   const [expanded,    setExpanded]    = useState({})
   const [selected,    setSelected]    = useState(new Set())
   const [bulkCat,     setBulkCat]     = useState('')
@@ -172,14 +187,29 @@ export default function Transactions({ clientId = null }) {
 
   const catOf = useCallback(t => effCat(assignments, t), [assignments])
 
+  // Date range narrows the working set before grouping, so group totals and
+  // counts describe the selected window rather than all history. ISO date
+  // strings compare lexicographically, which is also chronological.
+  const dateActive = !!(dateFrom || dateTo)
+  const dateFiltered = useMemo(() => {
+    if (!dateFrom && !dateTo) return txns
+    return txns.filter(t => {
+      const d = t.transaction_date || ''
+      if (dateFrom && d < dateFrom) return false
+      if (dateTo   && d > dateTo)   return false
+      return true
+    })
+  }, [txns, dateFrom, dateTo])
+
   const groups = useMemo(() => {
-    // Suggestion index: most common category per normalized description
+    // Suggestion index is built from the full history, not the date window —
+    // narrowing the view shouldn't weaken the category suggestions.
     const descCatMap = buildDescCatMap(txns)
     const catIndex = buildCatIndex(descCatMap)
 
     // Separate pinned transactions
-    const mainTxns = txns.filter(t => !separated.has(t.id))
-    const sepTxns  = txns.filter(t =>  separated.has(t.id))
+    const mainTxns = dateFiltered.filter(t => !separated.has(t.id))
+    const sepTxns  = dateFiltered.filter(t =>  separated.has(t.id))
 
     // Build raw groups
     const groupMap = {}
@@ -215,7 +245,7 @@ export default function Transactions({ clientId = null }) {
     }))
 
     return [...mainGroups, ...sepGroups]
-  }, [txns, fuzzy, separated])
+  }, [txns, dateFiltered, fuzzy, separated])
 
   const statusByKey = useMemo(() => {
     const m = new Map()
@@ -240,6 +270,16 @@ export default function Transactions({ clientId = null }) {
     })
     setSavedMsg('')
   }
+
+  // Single-transaction edit, used by the ungrouped view. Review state is already
+  // keyed by transaction id, so this needs no group bookkeeping.
+  const assignTxn = (id, cat) => {
+    setAssignments(p => ({ ...p, [id]: cat }))
+    setSavedMsg('')
+  }
+
+  const acceptTxnSuggestion = (id, cat) => { assignTxn(id, cat) }
+  const rejectTxnSuggestion = id => setRejected(prev => new Set([...prev, id]))
 
   // Accepting a suggestion fills only uncategorized transactions — an
   // automated action never overwrites work a human already did.
@@ -266,9 +306,11 @@ export default function Transactions({ clientId = null }) {
 
   // ── Filter + pagination ────────────────────────────────────────────────────
 
-  // Selection is keyed by group key, so it must not survive anything that
-  // regroups; it deliberately does survive page changes.
-  useEffect(() => { setPage(0); setSelected(new Set()) }, [search, filter, fuzzy])
+  // Selection is keyed by group key in grouped view and by transaction id in
+  // flat view, so it must not survive anything that regroups or switches view;
+  // it deliberately does survive page changes.
+  useEffect(() => { setPage(0); setSelected(new Set()) }, [search, filter, fuzzy, view, dateFrom, dateTo])
+  useEffect(() => { setPage(0) }, [sortGrouped, sortFlat])
 
   const visibleGroups = useMemo(() => {
     const q = search.toLowerCase()
@@ -283,12 +325,73 @@ export default function Transactions({ clientId = null }) {
     })
   }, [groups, search, filter, statusByKey, hasSugg])
 
-  const pageCount  = Math.ceil(visibleGroups.length / PAGE_SIZE)
-  const pageGroups = visibleGroups.slice(page * PAGE_SIZE, (page + 1) * PAGE_SIZE)
+  const sortedGroups = useMemo(() => {
+    const { col, dir } = sortGrouped
+    const mul = dir === 'asc' ? 1 : -1
+    const val = g => {
+      switch (col) {
+        case 'count': return g.txns.length
+        case 'total': return g.total
+        default:      return g.key
+      }
+    }
+    return [...visibleGroups].sort((a, b) => mul * cmp(val(a), val(b)) || a.key.localeCompare(b.key))
+  }, [visibleGroups, sortGrouped])
+
+  // Group-derived facts a single transaction needs in flat view, where the
+  // status tabs still filter on suggestion/mixed state that only grouping knows.
+  const txnMeta = useMemo(() => {
+    const m = new Map()
+    groups.forEach(g => {
+      const st = statusByKey.get(g.key)
+      const sugg = hasSugg(g) ? g.suggestedCat : ''
+      g.txns.forEach(t => m.set(t.id, { mixed: st?.kind === 'mixed', sugg }))
+    })
+    return m
+  }, [groups, statusByKey, hasSugg])
+
+  const visibleTxns = useMemo(() => {
+    const q = search.toLowerCase()
+    return dateFiltered.filter(t => {
+      if (q && !(t.description || '').toLowerCase().includes(q)) return false
+      const c = catOf(t)
+      const meta = txnMeta.get(t.id)
+      if (filter === 'uncategorized' && c)  return false
+      if (filter === 'categorized'   && !c) return false
+      if (filter === 'mixed'         && !meta?.mixed) return false
+      if (filter === 'suggestions'   && !(meta?.sugg && !c && !rejected.has(t.id))) return false
+      return true
+    })
+  }, [dateFiltered, search, filter, catOf, txnMeta, rejected])
+
+  const sortedTxns = useMemo(() => {
+    const { col, dir } = sortFlat
+    const mul = dir === 'asc' ? 1 : -1
+    const val = t => {
+      switch (col) {
+        case 'description': return (t.description || '').toLowerCase()
+        case 'category':    return catOf(t).toLowerCase()
+        case 'account':     return (t.account || '').toLowerCase()
+        case 'amount':      return Number(t.amount) || 0
+        default:            return t.transaction_date || ''
+      }
+    }
+    return [...visibleTxns].sort((a, b) => mul * cmp(val(a), val(b)) || cmp(a.id, b.id))
+  }, [visibleTxns, sortFlat, catOf])
+
+  const onSortGrouped = col => setSortGrouped(p => nextSort(p, col))
+  const onSortFlat    = col => setSortFlat(p => nextSort(p, col))
+
+  const isFlat     = view === 'flat'
+  const pageSize   = isFlat ? FLAT_PAGE_SIZE : PAGE_SIZE
+  const rowCount   = isFlat ? sortedTxns.length : sortedGroups.length
+  const pageCount  = Math.ceil(rowCount / pageSize)
+  const pageGroups = sortedGroups.slice(page * PAGE_SIZE, (page + 1) * PAGE_SIZE)
+  const pageTxns   = sortedTxns.slice(page * FLAT_PAGE_SIZE, (page + 1) * FLAT_PAGE_SIZE)
 
   // ── Stats (transaction-based, not group-based) ─────────────────────────────
 
-  const uncatTxnCount = useMemo(() => txns.filter(t => !catOf(t)).length, [txns, catOf])
+  const uncatTxnCount = useMemo(() => dateFiltered.filter(t => !catOf(t)).length, [dateFiltered, catOf])
   const suggCount     = useMemo(() => groups.filter(g => hasSugg(g)).length, [groups, hasSugg])
   const mixedCount    = useMemo(
     () => groups.filter(g => statusByKey.get(g.key)?.kind === 'mixed').length,
@@ -338,7 +441,7 @@ export default function Transactions({ clientId = null }) {
   // ── Delete ─────────────────────────────────────────────────────────────────
 
   const deleteSelected = async () => {
-    const ids = [...selected].flatMap(key => (groups.find(g => g.key === key)?.txns ?? []).map(t => t.id))
+    const ids = selectedTxns().map(t => t.id)
     if (!ids.length) return
     if (!confirm(`Permanently delete ${ids.length} transaction${ids.length !== 1 ? 's' : ''}? This cannot be undone.`)) return
     setSaving(true)
@@ -442,33 +545,43 @@ export default function Transactions({ clientId = null }) {
 
   // ── Bulk select ────────────────────────────────────────────────────────────
 
-  const allPageSel = pageGroups.length > 0 && pageGroups.every(g => selected.has(g.key))
+  // Selection keys differ per view (group key vs transaction id); every bulk
+  // action resolves them to transactions through here so both views share one
+  // code path.
+  const pageKeys   = isFlat ? pageTxns.map(t => t.id) : pageGroups.map(g => g.key)
+  const allPageSel = pageKeys.length > 0 && pageKeys.every(k => selected.has(k))
   const toggleSelAll = () => {
-    if (allPageSel) setSelected(p => { const n = new Set(p); pageGroups.forEach(g => n.delete(g.key)); return n })
-    else            setSelected(p => { const n = new Set(p); pageGroups.forEach(g => n.add(g.key));    return n })
+    if (allPageSel) setSelected(p => { const n = new Set(p); pageKeys.forEach(k => n.delete(k)); return n })
+    else            setSelected(p => { const n = new Set(p); pageKeys.forEach(k => n.add(k));    return n })
   }
 
-  const selectedGroups = () => [...selected].map(k => groups.find(g => g.key === k)).filter(Boolean)
+  const selectedTxns = useCallback(() => (
+    isFlat
+      ? [...selected].map(id => txnById.get(id)).filter(Boolean)
+      : [...selected].flatMap(k => groups.find(g => g.key === k)?.txns ?? [])
+  ), [isFlat, selected, txnById, groups])
 
   const applyBulk = () => {
     const cat = bulkCat.trim()
     if (!selected.size || !cat) return
     setAssignments(p => {
       const next = { ...p }
-      selectedGroups().forEach(g => g.txns.forEach(t => { next[t.id] = cat }))
+      selectedTxns().forEach(t => { next[t.id] = cat })
       return next
     })
     setSelected(new Set()); setBulkCat(''); setSavedMsg('')
   }
 
   const clearBulkCats = () => {
-    const gs = selectedGroups()
-    const txCount = gs.reduce((s, g) => s + g.txns.length, 0)
-    if (!txCount) return
-    if (!confirm(`Clear the category on ${txCount} transaction${txCount !== 1 ? 's' : ''} across ${gs.length} group${gs.length !== 1 ? 's' : ''}?`)) return
+    const ts = selectedTxns()
+    if (!ts.length) return
+    const scope = isFlat
+      ? `${ts.length} transaction${ts.length !== 1 ? 's' : ''}`
+      : `${ts.length} transaction${ts.length !== 1 ? 's' : ''} across ${selected.size} group${selected.size !== 1 ? 's' : ''}`
+    if (!confirm(`Clear the category on ${scope}?`)) return
     setAssignments(p => {
       const next = { ...p }
-      gs.forEach(g => g.txns.forEach(t => { next[t.id] = '' }))
+      ts.forEach(t => { next[t.id] = '' })
       return next
     })
     setSelected(new Set()); setSavedMsg('')
@@ -497,7 +610,9 @@ export default function Transactions({ clientId = null }) {
         <div>
           <h2 style={s.h2}>Transactions</h2>
           <p style={s.sub}>
-            {groups.length} merchant groups · {txns.length} transactions
+            {!isFlat && <>{groups.length} merchant groups · </>}
+            {dateFiltered.length} transaction{dateFiltered.length !== 1 ? 's' : ''}
+            {dateActive && <> <span style={{ color: T.navy, fontWeight: 500 }}>in range</span> of {txns.length}</>}
             {loadingMore && <> · <span style={{ color: T.charcoal, opacity: .6 }}>loading more…</span></>}
             {uncatTxnCount > 0 && <> · <span style={{ color: T.amber, fontWeight: 500 }}>{uncatTxnCount} transaction{uncatTxnCount !== 1 ? 's' : ''} uncategorized</span></>}
             {suggCount  > 0 && <> · <span style={{ color: T.gold, fontWeight: 500 }}>{suggCount} suggestions</span></>}
@@ -533,6 +648,17 @@ export default function Transactions({ clientId = null }) {
 
       {/* Toolbar */}
       <div style={s.toolbar}>
+        <div style={s.tabs}>
+          {[['grouped', 'Grouped'], ['flat', 'All transactions']].map(([val, label]) => (
+            <button key={val}
+              style={{ ...s.tab, ...(view === val ? s.tabActive : {}) }}
+              onClick={() => setView(val)}
+              title={val === 'grouped'
+                ? 'One row per merchant, with transactions rolled up'
+                : 'One row per transaction, individually editable'}
+            >{label}</button>
+          ))}
+        </div>
         <input
           style={{ ...s.input, width: 240 }}
           placeholder="Search descriptions…"
@@ -553,16 +679,39 @@ export default function Transactions({ clientId = null }) {
             >{label}</button>
           ))}
         </div>
-        <label style={s.fuzzyLabel}>
-          <input type="checkbox" checked={fuzzy} onChange={e => setFuzzy(e.target.checked)} />
-          Group similar merchants
-        </label>
+        <div style={s.dateRange}>
+          <span style={s.dateLabel}>Date</span>
+          <input
+            type="date" style={{ ...s.input, width: 132 }}
+            value={dateFrom} max={dateTo || undefined}
+            onChange={e => setDateFrom(e.target.value)}
+            aria-label="From date"
+          />
+          <span style={{ color: T.charcoal, opacity: .5 }}>→</span>
+          <input
+            type="date" style={{ ...s.input, width: 132 }}
+            value={dateTo} min={dateFrom || undefined}
+            onChange={e => setDateTo(e.target.value)}
+            aria-label="To date"
+          />
+          {dateActive && (
+            <button style={s.clearDates} onClick={() => { setDateFrom(''); setDateTo('') }} title="Clear date filter">✕</button>
+          )}
+        </div>
+        {!isFlat && (
+          <label style={s.fuzzyLabel}>
+            <input type="checkbox" checked={fuzzy} onChange={e => setFuzzy(e.target.checked)} />
+            Group similar merchants
+          </label>
+        )}
       </div>
 
       {/* Bulk bar */}
       {selected.size > 0 && (
         <div style={s.bulkBar}>
-          <span style={{ fontSize: 13, color: '#1e40af' }}><strong>{selected.size}</strong> selected</span>
+          <span style={{ fontSize: 13, color: '#1e40af' }}>
+            <strong>{selected.size}</strong> {isFlat ? 'transaction' : 'group'}{selected.size !== 1 ? 's' : ''} selected
+          </span>
           <input
             style={{ ...s.input, width: 220 }}
             list="bulk-cats"
@@ -582,24 +731,101 @@ export default function Transactions({ clientId = null }) {
         </div>
       )}
 
-      {/* Group table */}
-      {visibleGroups.length === 0 ? (
+      {/* Transaction table */}
+      {rowCount === 0 ? (
         <p style={{ color: '#9ca3af', textAlign: 'center', padding: '48px 0', fontSize: 14 }}>
-          No groups match your filter.
+          No {isFlat ? 'transactions' : 'groups'} match your filters.
         </p>
       ) : (
         <>
           <div style={{ overflowX: 'auto' }}>
+            {isFlat ? (
             <table style={s.table}>
               <thead>
                 <tr>
                   <th style={{ ...s.th, width: 36 }}>
                     <input type="checkbox" checked={allPageSel} onChange={toggleSelAll} />
                   </th>
-                  <th style={s.th}>Merchant / Description</th>
+                  <SortTh col="date"        label="Date"        sort={sortFlat} onSort={onSortFlat} width={110} />
+                  <SortTh col="description" label="Description" sort={sortFlat} onSort={onSortFlat} />
                   <th style={{ ...s.th, minWidth: 280 }}>Account Category</th>
-                  <th style={{ ...s.th, width: 60, textAlign: 'right' }}>Txns</th>
-                  <th style={{ ...s.th, width: 110, textAlign: 'right' }}>Total</th>
+                  <SortTh col="amount"      label="Amount"      sort={sortFlat} onSort={onSortFlat} width={120} align="right" />
+                  <SortTh col="account"     label="Account"     sort={sortFlat} onSort={onSortFlat} width={150} />
+                </tr>
+              </thead>
+              <tbody>
+                {pageTxns.map((t, i) => {
+                  const cat     = catOf(t)
+                  const isDirty = t.id in assignments && (assignments[t.id] || '') !== (t.category || '')
+                  const meta    = txnMeta.get(t.id)
+                  const sugg    = meta?.sugg && !cat && !rejected.has(t.id) ? meta.sugg : ''
+                  const unknownCat = cat && !allCats.includes(cat)
+                  const amt = Number(t.amount) || 0
+
+                  return (
+                    <tr key={t.id} style={{
+                      background: isDirty ? '#eff6ff' : sugg ? '#fdf4ff' : (i % 2 === 0 ? '#fff' : '#f9fafb'),
+                    }}>
+                      <td style={s.td}>
+                        <input
+                          type="checkbox"
+                          checked={selected.has(t.id)}
+                          onChange={() => setSelected(p => {
+                            const n = new Set(p); n.has(t.id) ? n.delete(t.id) : n.add(t.id); return n
+                          })}
+                        />
+                      </td>
+                      <td style={{ ...s.td, whiteSpace: 'nowrap', fontVariantNumeric: 'tabular-nums' }}>
+                        {t.transaction_date || '—'}
+                      </td>
+                      <td style={{ ...s.td, maxWidth: 0, width: '99%' }}>
+                        <div style={{ display: 'flex', alignItems: 'center', gap: 7, overflow: 'hidden' }}>
+                          {isDirty && <span style={s.dirtyDot} title="Unsaved change" />}
+                          {separated.has(t.id) && <span style={s.sepTag}>separated</span>}
+                          <span title={t.description} style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', fontSize: 13, color: '#111827' }}>
+                            {t.description}
+                          </span>
+                        </div>
+                      </td>
+                      <td style={s.td}>
+                        {sugg && (
+                          <div style={s.suggRow}>
+                            <span style={s.suggDot} />
+                            <span style={s.suggLabel}>Suggested: {sugg}</span>
+                            <button style={s.acceptBtn} onClick={() => acceptTxnSuggestion(t.id, sugg)} title="Accept this suggestion">✓</button>
+                            <button style={s.rejectBtn} onClick={() => rejectTxnSuggestion(t.id)} title="Dismiss">✕</button>
+                          </div>
+                        )}
+                        <CategoryInput
+                          value={cat}
+                          onChange={val => assignTxn(t.id, val)}
+                          categories={allCats}
+                          groups={groupedCats}
+                          style={unknownCat
+                            ? { border: '1px solid #d97706', boxShadow: '0 0 0 2px #FDE68A' }
+                            : isDirty ? { border: '1px solid #3b82f6', boxShadow: '0 0 0 2px #bfdbfe' } : {}}
+                        />
+                      </td>
+                      <td style={{ ...s.td, textAlign: 'right', whiteSpace: 'nowrap', fontVariantNumeric: 'tabular-nums', color: amt < 0 ? '#dc2626' : '#16a34a' }}>
+                        {fmt2(amt)}
+                      </td>
+                      <td style={{ ...s.td, whiteSpace: 'nowrap' }}>{t.account || '—'}</td>
+                    </tr>
+                  )
+                })}
+              </tbody>
+            </table>
+            ) : (
+            <table style={s.table}>
+              <thead>
+                <tr>
+                  <th style={{ ...s.th, width: 36 }}>
+                    <input type="checkbox" checked={allPageSel} onChange={toggleSelAll} />
+                  </th>
+                  <SortTh col="description" label="Merchant / Description" sort={sortGrouped} onSort={onSortGrouped} />
+                  <th style={{ ...s.th, minWidth: 280 }}>Account Category</th>
+                  <SortTh col="count"       label="Txns"                  sort={sortGrouped} onSort={onSortGrouped} width={60}  align="right" />
+                  <SortTh col="total"       label="Total"                 sort={sortGrouped} onSort={onSortGrouped} width={120} align="right" />
                   <th style={{ ...s.th, width: 40 }}></th>
                 </tr>
               </thead>
@@ -681,8 +907,8 @@ export default function Transactions({ clientId = null }) {
                         <td style={{ ...s.td, textAlign: 'right', color: '#9ca3af', fontSize: 13 }}>
                           {g.txns.length}
                         </td>
-                        <td style={{ ...s.td, textAlign: 'right', fontVariantNumeric: 'tabular-nums', color: g.total < 0 ? '#dc2626' : '#16a34a' }}>
-                          {g.total.toFixed(2)}
+                        <td style={{ ...s.td, textAlign: 'right', whiteSpace: 'nowrap', fontVariantNumeric: 'tabular-nums', color: g.total < 0 ? '#dc2626' : '#16a34a' }}>
+                          {fmt2(g.total)}
                         </td>
                         <td style={s.td}>
                           <button style={s.expandBtn} onClick={() => setExpanded(p => ({ ...p, [g.key]: !p[g.key] }))}>
@@ -714,8 +940,8 @@ export default function Transactions({ clientId = null }) {
                                     <tr key={t.id} style={{ background: '#fff' }}>
                                       <td style={{ ...s.td, padding: '4px 8px', whiteSpace: 'nowrap' }}>{t.transaction_date}</td>
                                       <td style={{ ...s.td, padding: '4px 8px', maxWidth: 300, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{t.description}</td>
-                                      <td style={{ ...s.td, padding: '4px 8px', textAlign: 'right', fontVariantNumeric: 'tabular-nums', color: Number(t.amount) < 0 ? '#dc2626' : '#16a34a' }}>
-                                        {Number(t.amount).toFixed(2)}
+                                      <td style={{ ...s.td, padding: '4px 8px', textAlign: 'right', whiteSpace: 'nowrap', fontVariantNumeric: 'tabular-nums', color: Number(t.amount) < 0 ? '#dc2626' : '#16a34a' }}>
+                                        {fmt2(Number(t.amount))}
                                       </td>
                                       <td style={{ ...s.td, padding: '4px 8px', color: catOf(t) ? T.charcoal : '#d97706', fontStyle: catOf(t) ? 'normal' : 'italic' }}>
                                         {catOf(t) || 'uncategorized'}
@@ -749,12 +975,15 @@ export default function Transactions({ clientId = null }) {
                 })}
               </tbody>
             </table>
+            )}
           </div>
 
           {pageCount > 1 && (
             <div style={s.pager}>
               <button style={s.btnSecondary} disabled={page === 0} onClick={() => setPage(p => p - 1)}>← Prev</button>
-              <span style={{ fontSize: 13, color: '#6b7280' }}>Page {page + 1} of {pageCount} · {visibleGroups.length} groups</span>
+              <span style={{ fontSize: 13, color: '#6b7280' }}>
+                Page {page + 1} of {pageCount} · {rowCount} {isFlat ? 'transactions' : 'groups'}
+              </span>
               <button style={s.btnSecondary} disabled={page >= pageCount - 1} onClick={() => setPage(p => p + 1)}>Next →</button>
             </div>
           )}
@@ -775,6 +1004,29 @@ export default function Transactions({ clientId = null }) {
         />
       )}
     </div>
+  )
+}
+
+// ─── Sortable column header ───────────────────────────────────────────────────
+
+function SortTh({ col, label, sort, onSort, width, align, title }) {
+  const active = sort.col === col
+  return (
+    <th
+      style={{
+        ...s.th,
+        ...(width ? { width } : {}),
+        ...(align === 'right' ? { textAlign: 'right' } : {}),
+        cursor: 'pointer', userSelect: 'none',
+      }}
+      onClick={() => onSort(col)}
+      title={title || `Sort by ${label.toLowerCase()}`}
+    >
+      {label}
+      <span style={{ marginLeft: 4, fontSize: 8, opacity: active ? 0.9 : 0.3 }}>
+        {active ? (sort.dir === 'asc' ? '▲' : '▼') : '⇅'}
+      </span>
+    </th>
   )
 }
 
@@ -843,6 +1095,9 @@ const s = {
   tab:         { padding: '5px 12px', border: `1px solid ${T.border}`, borderRadius: 5, background: '#fff', fontSize: 11, color: T.charcoal, cursor: 'pointer', fontWeight: 400 },
   tabActive:   { background: T.navy, color: '#fff', border: `1px solid ${T.navy}`, fontWeight: 500 },
   fuzzyLabel:  { display: 'flex', alignItems: 'center', gap: 6, fontSize: 11, color: T.charcoal, cursor: 'pointer', userSelect: 'none' },
+  dateRange:   { display: 'flex', alignItems: 'center', gap: 5 },
+  dateLabel:   { fontSize: 9.5, fontWeight: 700, color: T.gold, textTransform: 'uppercase', letterSpacing: '.06em' },
+  clearDates:  { padding: '3px 7px', background: '#fff', color: T.charcoal, border: `1px solid ${T.border}`, borderRadius: 4, fontSize: 10, cursor: 'pointer', lineHeight: 1.3 },
   bulkBar:     { display: 'flex', gap: 8, alignItems: 'center', background: '#EBF1F7', border: '1px solid #B8CDE0', borderRadius: 6, padding: '8px 12px', marginBottom: 12, flexWrap: 'wrap' },
   table:       { width: '100%', borderCollapse: 'collapse' },
   th:          { background: T.page, padding: '7px 10px', textAlign: 'left', fontWeight: 700, borderBottom: `2px solid ${T.border}`, fontSize: 9.5, color: T.gold, textTransform: 'uppercase', letterSpacing: '.06em', whiteSpace: 'nowrap' },

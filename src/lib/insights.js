@@ -3,6 +3,45 @@ import { normKey } from './merchantClustering'
 // Business-insight computations for the dashboard. All pure functions.
 // Sign convention: revenue positive, expenses negative (matches the DB).
 
+// ─── Monthly P&L ──────────────────────────────────────────────────────────────
+// The shape nearly everything else here consumes: one row per month with data,
+// sorted by period. Categories with no section fall back to Operating Expenses,
+// matching the rest of the app. Revenue is NET of Deductions to Income, and
+// `cogs`/`totalOpex` are flipped positive because they read as "money spent".
+
+export function buildMonthlyPL({ txns, sectionMap }) {
+  const byMonth = {}
+  txns.forEach(t => {
+    const ym = (t.transaction_date || '').slice(0, 7)
+    if (!ym || !t.category) return
+    const section = sectionMap[t.category] ?? 'Operating Expenses'
+    if (!byMonth[ym]) byMonth[ym] = {}
+    byMonth[ym][section] = (byMonth[ym][section] ?? 0) + (Number(t.amount) || 0)
+  })
+  return Object.keys(byMonth).sort().map(ym => {
+    const d = byMonth[ym]
+    const [y, m] = ym.split('-')
+    const revSum   = d['Revenue']                ?? 0
+    const dedSum   = d['Deductions to Income']   ?? 0
+    const cogsSum  = d['Cost of Goods Sold']     ?? 0
+    const opexSum  = d['Operating Expenses']     ?? 0
+    const nonOpInc = d['Non-Operating Income']   ?? 0
+    const nonOpExp = d['Non-Operating Expenses'] ?? 0
+    const netRev      = revSum + dedSum
+    const grossProfit = netRev + cogsSum
+    const netProfit   = grossProfit + opexSum + nonOpInc + nonOpExp
+    return {
+      period: ym, year: +y, month: +m,
+      revenue: netRev,
+      cogs: -cogsSum,
+      grossProfit,
+      grossMarginPct: netRev > 0 ? (grossProfit / netRev * 100) : null,
+      totalOpex: -opexSum,
+      netProfit,
+    }
+  })
+}
+
 // ─── Breakeven ────────────────────────────────────────────────────────────────
 // Monthly revenue needed to cover fixed costs at the current gross margin.
 // Fixed costs come from accounts tagged cost_type='fixed'; if nothing is
@@ -59,6 +98,7 @@ export function computeRecurring(txns, { minMonths = 3, maxItems = 8 } = {}) {
   txns.forEach(t => {
     const amt = Number(t.amount) || 0
     if (amt >= 0) return // bills only
+    if (t.account === ADJUSTMENTS_ACCOUNT) return // COGS/true-up entries aren't bills
     const key = normKey(t.description)
     if (!key) return
     if (!groups[key]) groups[key] = { key, displayDesc: t.description, items: [] }
@@ -92,19 +132,165 @@ export function computeRecurring(txns, { minMonths = 3, maxItems = 8 } = {}) {
     .slice(0, maxItems)
 }
 
+// ─── Year-end projection ──────────────────────────────────────────────────────
+// Where the year lands if the rest of it behaves like the year so far.
+//
+// Each remaining month is projected from the SAME month last year, scaled by
+// how this year is actually running against last year over the months both
+// share. That keeps last year's seasonal shape (a card shop's December is not
+// its February) while letting this year's trend set the level. Without a
+// comparable prior month the month falls back to this year's own average.
+//
+// Only COMPLETE months count as actual: the in-progress month is projected
+// along with the rest, because a month that is three days old would otherwise
+// drag every average down. Complete months that were never imported are
+// projected too — a year-end total has to cover all twelve either way — and
+// counted in `gapMonths` so the dashboard can say so.
+
+const PL_KEYS = ['revenue', 'cogs', 'totalOpex', 'nonOperating']
+
+// netProfit = grossProfit − totalOpex + non-operating, so the residual is what
+// the monthly P&L rows don't break out on their own.
+const nonOperating = r => r.netProfit - r.grossProfit + r.totalOpex
+
+const sumKey = (rows, key) =>
+  rows.reduce((s, r) => s + (key === 'nonOperating' ? nonOperating(r) : (r[key] ?? 0)), 0)
+
+// Revenue − COGS and the bottom line are derived, never projected directly, so
+// the projected P&L still adds up the way the actual one does.
+const derive = t => ({
+  ...t,
+  grossProfit: t.revenue - t.cogs,
+  netProfit: t.revenue - t.cogs - t.totalOpex + t.nonOperating,
+})
+
+export function computeYearEndProjection({ monthlyPL, year, now = new Date() }) {
+  // Only the live year can be projected; a past year is simply what it was.
+  if (!year || year !== now.getFullYear()) return null
+
+  const curMonth = now.getMonth() + 1
+  const actual = monthlyPL.filter(r => r.year === year && r.month < curMonth)
+  if (!actual.length) return null
+
+  const actualMonths = actual.map(r => r.month)
+  const missing = Array.from({ length: 12 }, (_, i) => i + 1).filter(m => !actualMonths.includes(m))
+  if (!missing.length) return null // year already fully banked
+
+  const prevYear = year - 1
+  const prev = monthlyPL.filter(r => r.year === prevYear)
+
+  // Growth is measured only over months BOTH years completed, so a part-year
+  // is never scored against a full one.
+  const overlap = actualMonths.filter(m => prev.some(p => p.month === m))
+  const growth = {}
+  PL_KEYS.forEach(key => {
+    // Non-operating items are small, lumpy and can be negative — ratio-scaling
+    // them produces nonsense, so they always run off this year's average.
+    if (key === 'nonOperating' || overlap.length < 2) { growth[key] = null; return }
+    const curSum = sumKey(actual.filter(r => overlap.includes(r.month)), key)
+    const prevSum = sumKey(prev.filter(r => overlap.includes(r.month)), key)
+    if (!(prevSum > 0) || !(curSum > 0)) { growth[key] = null; return }
+    // Guard against a thin prior year turning into an implausible multiplier.
+    growth[key] = Math.min(5, Math.max(0.2, curSum / prevSum))
+  })
+
+  const avg = {}
+  PL_KEYS.forEach(key => { avg[key] = sumKey(actual, key) / actual.length })
+
+  const monthly = []
+  const seasonal = []
+  for (let m = 1; m <= 12; m++) {
+    const row = actual.find(r => r.month === m)
+    if (row) {
+      monthly.push(derive({
+        month: m, projected: false,
+        revenue: row.revenue, cogs: row.cogs, totalOpex: row.totalOpex, nonOperating: nonOperating(row),
+      }))
+      continue
+    }
+    const prevRow = prev.find(p => p.month === m)
+    const vals = {}
+    let usedSeasonal = false
+    PL_KEYS.forEach(key => {
+      const g = growth[key]
+      if (prevRow && g != null) {
+        vals[key] = sumKey([prevRow], key) * g
+        usedSeasonal = true
+      } else {
+        vals[key] = avg[key]
+      }
+    })
+    if (usedSeasonal) seasonal.push(m)
+    monthly.push(derive({ month: m, projected: true, basis: usedSeasonal ? 'seasonal' : 'runrate', ...vals }))
+  }
+
+  const totalsOf = rows => derive(Object.fromEntries(PL_KEYS.map(k => [k, sumKey(rows, k)])))
+  const actualTotals = totalsOf(actual)
+  const projectedTotals = totalsOf(monthly.filter(r => r.projected))
+  const yearEnd = derive(Object.fromEntries(PL_KEYS.map(k => [k, actualTotals[k] + projectedTotals[k]])))
+
+  return {
+    year, prevYear: prev.length ? prevYear : null,
+    actualMonths, projectedMonths: missing,
+    // Complete months with no data at all — projected here, but really they
+    // just need importing, so the dashboard nudges rather than pretends.
+    gapMonths: missing.filter(m => m < curMonth),
+    basis: seasonal.length === missing.length ? 'seasonal' : (seasonal.length ? 'mixed' : 'runrate'),
+    seasonalMonths: seasonal,
+    growth,
+    revenueGrowthPct: growth.revenue != null ? (growth.revenue - 1) * 100 : null,
+    actual: actualTotals,
+    projected: projectedTotals,
+    yearEnd,
+    prevTotal: prev.length ? { ...totalsOf(prev), months: prev.length } : null,
+    monthly,
+    prevMonthly: prev.map(r => ({ month: r.month, revenue: r.revenue })),
+    confidence: actual.length >= 6 && overlap.length >= 2 ? 'high'
+      : actual.length >= 3 ? 'medium' : 'low',
+  }
+}
+
 // ─── Sales tax set-aside ──────────────────────────────────────────────────────
+// Since the liability migration (2026-08), collected tax accrues to the
+// 'Sales Tax Payable' account and remittances reduce it; `liability` is that
+// account's running balance (negative = paid ahead of accruals). Pre-cutover
+// payments live in 'Sales Taxes'/'Sales Taxes Paid' (revenue-deduction era).
+
+const TAX_PAYMENT_CATS = new Set(['Sales Taxes', 'Sales Taxes Paid', 'Sales Tax Payable'])
 
 export function computeSalesTax({ squareReports, txns, year }) {
   const collected = squareReports
     .filter(r => (r.period || '').startsWith(String(year)))
     .reduce((s, r) => s + (Number(r.tax_collected) || 0), 0)
 
+  // Real remittances only: negative cash rows, never the accrual journal rows.
   const paid = txns
-    .filter(t => t.category === 'Sales Taxes Paid' && (t.transaction_date || '').startsWith(String(year)))
+    .filter(t => TAX_PAYMENT_CATS.has(t.category)
+      && t.account !== ADJUSTMENTS_ACCOUNT
+      && (Number(t.amount) || 0) < 0
+      && (t.transaction_date || '').startsWith(String(year)))
     .reduce((s, t) => s + Math.abs(Number(t.amount) || 0), 0)
 
-  if (!collected && !paid) return null
-  return { collected, paid, owed: collected - paid }
+  const liabilityRows = txns.filter(t => t.category === 'Sales Tax Payable')
+  const liability = liabilityRows.length
+    ? Math.round(liabilityRows.reduce((s, t) => s + (Number(t.amount) || 0), 0) * 100) / 100
+    : null
+
+  if (!collected && !paid && liability == null) return null
+  return { collected, paid, owed: collected - paid, liability }
+}
+
+// Sales-tax accrual proposal for one month: the Square report's tax_collected,
+// flagged booked once the accrual pair exists. Null when there's no report or
+// no tax that month.
+export function computeTaxAccrualProposal({ month, squareReports, txns }) {
+  if (!month) return null
+  const tax = Number(squareReports.find(r => r.period === month)?.tax_collected) || 0
+  if (tax <= 0) return null
+  return {
+    amount: Math.round(tax * 100) / 100,
+    booked: txns.some(t => t.category === 'Sales Tax Collected' && (t.transaction_date || '').startsWith(month)),
+  }
 }
 
 // ─── Cash runway ──────────────────────────────────────────────────────────────
@@ -129,21 +315,38 @@ export function computeRunway({ cash, monthlyPL }) {
 // month's bank rows (the dashboard's txns list excludes uncategorized ones);
 // the txns fallback exists only for callers that don't have that count.
 
-export function computeCloseChecklist({ txns, squareReports, uncatCount, prevMonthTxnCount = null }) {
-  const now = new Date()
+// `month` ('YYYY-MM') overrides the default for callers that close an arbitrary
+// month; omitting it keeps the original "most recent complete month" behaviour.
+
+export function computeCloseChecklist({ txns, squareReports, uncatCount, prevMonthTxnCount = null, counts = [], month = null, now = new Date() }) {
   const prev = new Date(now.getFullYear(), now.getMonth() - 1, 1)
-  const ym = `${prev.getFullYear()}-${String(prev.getMonth() + 1).padStart(2, '0')}`
-  const label = prev.toLocaleString('default', { month: 'long', year: 'numeric' })
+  const defaultYm = `${prev.getFullYear()}-${String(prev.getMonth() + 1).padStart(2, '0')}`
+  const ym = month || defaultYm
+  const [yNum, mNum] = ym.split('-').map(Number)
+  const label = new Date(yNum, mNum - 1, 1).toLocaleString('default', { month: 'long', year: 'numeric' })
+  const isQuarterEnd = [3, 6, 9, 12].includes(mNum)
+
+  // prevMonthTxnCount describes the DEFAULT month only — for any other month it
+  // would be the wrong answer, so fall back to scanning the rows we were given.
+  const useProvidedCount = prevMonthTxnCount != null && ym === defaultYm
 
   return {
     month: ym,
     label,
-    bankImported: prevMonthTxnCount != null
+    bankImported: useProvidedCount
       ? prevMonthTxnCount > 0
       : txns.some(t => (t.transaction_date || '').startsWith(ym)),
     squareUploaded: squareReports.some(r => r.period === ym),
     allCategorized: uncatCount === 0,
     uncatCount,
+    cogsBooked: txns.some(t => t.category === 'Product Costs' && (t.transaction_date || '').startsWith(ym)),
+    taxApplicable: squareReports.some(r => r.period === ym && (Number(r.tax_collected) || 0) > 0),
+    taxAccrued: txns.some(t => t.category === 'Sales Tax Collected' && (t.transaction_date || '').startsWith(ym)),
+    isQuarterEnd,
+    // The count is typically entered a few days into the next month (count
+    // Sep 30, type it in Oct 2) — accept any count from the quarter's final
+    // month onward.
+    countEntered: !isQuarterEnd || (counts || []).some(c => (c.date || '') >= `${ym}-01`),
   }
 }
 
@@ -184,4 +387,112 @@ export function computeCategoryMargins({ squareReports, buys, cogsPct, year }) {
       }
     })
     .sort((a, b) => b.revenue - a.revenue)
+}
+
+// ─── COGS booking + Open to Buy (gross margin method — see COGS_PLAN.md) ──────
+// Adjustment entries are zero-net pairs in bank_transactions marked with this
+// account value; everything below treats them as journal entries, not cash.
+
+export const ADJUSTMENTS_ACCOUNT = 'Adjustments'
+
+const round2 = n => Math.round(n * 100) / 100
+const pctToRatio = p => {
+  const n = Number(p)
+  return Number.isFinite(n) && n > 0 ? n / 100 : null
+}
+
+export const lastDayOfMonth = ym => {
+  const [y, m] = ym.split('-').map(Number)
+  return `${ym}-${String(new Date(y, m, 0).getDate()).padStart(2, '0')}`
+}
+
+// Proposed COGS entry for one month. Hybrid when the month's Square report has
+// a real Sealed Products breakdown and both hybrid ratios are set; blended
+// fallback otherwise. Ratios are stored as percents (0–100) in `cogs_method`.
+export function computeCogsProposal({ month, monthlyPL, squareReports, method }) {
+  if (!month || !method) return null
+  const revenue = monthlyPL.find(r => r.period === month)?.revenue ?? 0
+  if (revenue <= 0) return null
+
+  const report = squareReports.find(r => r.period === month)
+  const cats = Array.isArray(report?.categories) ? report.categories : []
+  const sealed = Number(cats.find(c => c.name === 'Sealed Products')?.amount) || 0
+  const sealedRatio = pctToRatio(method.sealedCostRatio)
+  const restRatio = pctToRatio(method.restPct)
+  const blendedRatio = pctToRatio(method.blendedPct)
+
+  if (sealed > 0 && sealedRatio != null && restRatio != null) {
+    const other = Math.max(0, (Number(report.gross_sales) || 0) - sealed)
+    return {
+      formula: 'hybrid',
+      amount: round2(sealed * sealedRatio + other * restRatio),
+      parts: { sealed, other, sealedPct: Number(method.sealedCostRatio), restPct: Number(method.restPct) },
+    }
+  }
+  if (blendedRatio == null) return null
+  return {
+    formula: 'blended',
+    amount: round2(revenue * blendedRatio),
+    parts: { revenue, blendedPct: Number(method.blendedPct) },
+  }
+}
+
+// Positive book value of the Inventory asset (purchases are negative amounts,
+// relief entries positive, so the balance is minus the category sum).
+export function inventoryBookBalance(txns) {
+  return round2(-txns
+    .filter(t => t.category === 'Inventory')
+    .reduce((s, t) => s + (Number(t.amount) || 0), 0))
+}
+
+// ─── Open to Buy ──────────────────────────────────────────────────────────────
+// "How much can we spend on inventory this week without endangering the fixed
+// obligations?" Reserve = trailing avg monthly OpEx + avg credit-card payment
+// + sales-tax set-aside + cash floor. Deliberately conservative: a full
+// month-sized obligation window, even if some bills already cleared (the cash
+// entry already reflects them, so any double-count errs toward caution).
+
+export function computeOpenToBuy({ cash, txns, monthlyPL, salesTax, budget, now = new Date() }) {
+  if (cash?.amount == null) return null
+
+  // Trailing 3 COMPLETE months — the in-progress month would drag averages down.
+  const nowYM = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}`
+  const recent = monthlyPL.filter(r => r.period < nowYM).slice(-3)
+  if (!recent.length) return null
+  const months = new Set(recent.map(r => r.period))
+  const n = recent.length
+
+  // Cash movements only — Adjustments rows are journal entries, not spending.
+  const sumCat = cat => txns.reduce((s, t) =>
+    (t.category === cat && t.account !== ADJUSTMENTS_ACCOUNT
+      && months.has((t.transaction_date || '').slice(0, 7)))
+      ? s + (Number(t.amount) || 0) : s, 0)
+
+  const avgOpex = recent.reduce((s, r) => s + r.totalOpex, 0) / n
+  const ccMonthly = Math.max(0, -sumCat('Credit Card Payment') / n)
+  // Prefer the liability balance (what's actually owed) over the YTD net.
+  const taxOwed = Math.max(0, salesTax?.liability ?? salesTax?.owed ?? 0)
+  const floor = Math.max(0, Number(budget?.cashFloor) || 0)
+  const haircut = Number(budget?.depositHaircut) > 0 ? Number(budget.depositHaircut) : 0.8
+
+  const reserve = round2(avgOpex + ccMonthly + taxOwed + floor)
+  const availableNow = Math.max(0, round2(cash.amount - reserve))
+  const weeklyDeposits = round2((recent.reduce((s, r) => s + r.revenue, 0) / n) / 4.33 * haircut)
+  const availableUpper = round2(availableNow + weeklyDeposits)
+  const weeklyBuys = round2(Math.max(0, -sumCat('Inventory')) / n / 4.33)
+
+  const staleDays = cash.asOf
+    ? Math.floor((now - new Date(`${cash.asOf}T00:00:00`)) / 86400000)
+    : null
+  return {
+    reserve,
+    breakdown: { avgOpex: round2(avgOpex), ccMonthly: round2(ccMonthly), taxOwed: round2(taxOwed), floor },
+    availableNow,
+    availableUpper,
+    weeklyDeposits,
+    weeklyBuys,
+    state: availableNow <= 0 ? 'hold' : (weeklyBuys > 0 && availableNow < weeklyBuys ? 'tight' : 'healthy'),
+    stale: staleDays == null || staleDays > 7,
+    staleDays,
+  }
 }

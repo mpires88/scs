@@ -6,6 +6,7 @@ import {
   renameAccount, deleteAccount, countTransactionsUsing, seedDefaults,
 } from '../lib/chartOfAccounts'
 import { T } from '../lib/theme'
+import LedgerAccountsPanel from './LedgerAccountsPanel'
 
 // ─── Helper: order accounts so children appear right after their parent ───────
 function buildDisplayList(sectionAccounts) {
@@ -452,6 +453,9 @@ export default function ChartOfAccounts({ clientId }) {
             </div>
           )
         })}
+
+        {/* Physical bank/card accounts (balance-sheet lines) */}
+        <LedgerAccountsPanel clientId={clientId} />
 
         {/* Global add form */}
         <div style={{ ...s.sectionCard, marginTop: 8 }}>

@@ -1,6 +1,7 @@
 import { useState, useEffect, useMemo, useCallback, Fragment } from 'react'
 import { supabase, fetchAll } from '../lib/supabase'
 import { PL_SECTIONS, fetchAccounts } from '../lib/chartOfAccounts'
+import { groupRowsByParent } from '../lib/plGrouping'
 import { getSetting, setSetting } from '../lib/settings'
 import { T, MON } from '../lib/theme'
 
@@ -22,6 +23,7 @@ export default function ReportsPL({ clientId }) {
   const [error,      setError]      = useState(null)
   const [year,       setYear]       = useState(null)
   const [showBudget, setShowBudget] = useState(false)
+  const [showAll,    setShowAll]    = useState(true)
   const [drafts,     setDrafts]     = useState({})
 
   useEffect(() => {
@@ -82,21 +84,42 @@ export default function ReportsPL({ clientId }) {
       acctMonth[t.category][m] = (acctMonth[t.category][m] ?? 0) + (Number(t.amount) || 0)
     })
 
-    // Section rows (only accounts with activity this year, in COA order)
+    // Section rows, in chart-of-accounts order. With "all accounts" on, every
+    // account in the chart appears even with no activity — otherwise a whole
+    // section can vanish (Cost of Goods Sold does exactly that here) while the
+    // computed line that depends on it still prints.
     const acctOrder = new Map(accounts.map((a, i) => [a.name, i]))
+    const secOfAcct = new Map(accounts.map(a => [a.name, a.pl_section]))
+    // Parents are represented by their group label + subtotal, so an empty
+    // parent needs no row of its own — it would render as all-dashes "(other)".
+    const hasChildren = new Set(
+      accounts.filter(a => a.parent && secOfAcct.get(a.parent) === a.pl_section).map(a => a.parent)
+    )
+
     const sections = PL_SECTIONS.map(section => {
-      const rows = Object.keys(acctMonth)
+      const names = Object.keys(acctMonth)
         .filter(name => (sectionMap[name] ?? 'Operating Expenses') === section)
+      if (showAll) {
+        accounts.forEach(a => {
+          if (a.pl_section !== section) return
+          if (acctMonth[a.name]) return          // already present with activity
+          if (hasChildren.has(a.name)) return    // covered by its group label
+          names.push(a.name)
+        })
+      }
+      const rows = [...new Set(names)]
         .sort((a, b) => (acctOrder.get(a) ?? 1e9) - (acctOrder.get(b) ?? 1e9))
         .map(name => {
-          const byMonth = acctMonth[name]
+          const byMonth = acctMonth[name] ?? {}
           const total = months.reduce((s, m) => s + (byMonth[m] ?? 0), 0)
           return { name, byMonth, total }
         })
       const totals = {}
       months.forEach(m => { totals[m] = rows.reduce((s, r) => s + (r.byMonth[m] ?? 0), 0) })
       const total = rows.reduce((s, r) => s + r.total, 0)
-      return { section, rows, totals, total }
+      // Display entries: sub-accounts fold under their parent with a subtotal.
+      // Section totals stay computed from the flat rows above.
+      return { section, rows, entries: groupRowsByParent(rows, accounts, section), totals, total }
     })
 
     const secBy = name => sections.find(s => s.section === name)
@@ -117,7 +140,7 @@ export default function ReportsPL({ clientId }) {
     })
 
     return { year, months, sections, computed }
-  }, [txns, sectionMap, accounts, year])
+  }, [txns, sectionMap, accounts, year, showAll])
 
   // ── Budget helpers ─────────────────────────────────────────────────────────
 
@@ -143,8 +166,14 @@ export default function ReportsPL({ clientId }) {
       if (sec.rows.length) {
         lines.push([sec.section])
         const sign = displaySign(sec.section)
-        sec.rows.forEach(r => {
-          lines.push([`  ${r.name}`, ...months.map(m => ((r.byMonth[m] ?? 0) * sign).toFixed(2)), (r.total * sign).toFixed(2)])
+        const rowLine = (label, r) =>
+          lines.push([label, ...months.map(m => ((r.byMonth[m] ?? 0) * sign).toFixed(2)), (r.total * sign).toFixed(2)])
+        sec.entries.forEach(en => {
+          if (en.kind === 'row') { rowLine(`  ${en.name}`, en); return }
+          lines.push([`  ${en.name}`])
+          en.children.forEach(r => rowLine(`    ${r.name}`, r))
+          if (en.own) rowLine(`    ${en.name} (other)`, en.own)
+          lines.push([`  Total ${en.name}`, ...months.map(m => ((en.totals[m] ?? 0) * sign).toFixed(2)), (en.total * sign).toFixed(2)])
         })
         lines.push([`Total ${sec.section}`, ...months.map(m => (sec.totals[m] * sign).toFixed(2)), (sec.total * sign).toFixed(2)])
       }
@@ -203,6 +232,13 @@ export default function ReportsPL({ clientId }) {
           </p>
         </div>
         <div className="pl-controls" style={{ display:'flex', gap:8, alignItems:'center', flexWrap:'wrap' }}>
+          <label
+            style={{ display:'flex', alignItems:'center', gap:6, fontSize:11, color:T.charcoal, cursor:'pointer', userSelect:'none' }}
+            title="Show every account in your chart of accounts, including ones with no activity this year. Turn off for a compact statement to print or send."
+          >
+            <input type="checkbox" checked={showAll} onChange={e => setShowAll(e.target.checked)} />
+            All accounts
+          </label>
           <label style={{ display:'flex', alignItems:'center', gap:6, fontSize:11, color:T.charcoal, cursor:'pointer', userSelect:'none' }}>
             <input type="checkbox" checked={showBudget} onChange={e => setShowBudget(e.target.checked)} />
             Budget vs. actual
@@ -293,8 +329,12 @@ export default function ReportsPL({ clientId }) {
 
         {statement && (
           <p style={{ fontSize:10.5, color:'rgba(74,74,74,0.55)', marginTop:10, lineHeight:1.6 }}>
-            Amounts in parentheses are negative. Expense sections show money spent as positive numbers;
-            computed lines (Net Revenue, Gross Profit, Operating Income, Net Income) are signed.
+            Amounts in parentheses are negative. A dash means no activity. Expense sections show money
+            spent as positive numbers; computed lines (Net Revenue, Gross Profit, Operating Income,
+            Net Income) are signed.
+            {showAll
+              ? ' Every account in your chart of accounts is listed — untick “All accounts” for a compact statement.'
+              : ' Only accounts with activity this year are listed — tick “All accounts” to see the full chart.'}
             {showBudget && ' Budgets are monthly targets — variance compares this year’s monthly average against them.'}
           </p>
         )}
@@ -314,40 +354,29 @@ function SectionRows({ sec, sign, months, showBudget, budgets, drafts, setDrafts
           {sec.section}
         </td>
       </tr>
-      {sec.rows.map(r => {
-        const avg = (r.total * sign) / monthCount
-        const budget = budgets[r.name]
-        const variance = budget != null ? avg - budget : null
-        // For expenses, over budget is bad; for revenue, under budget is bad
-        const bad = variance != null && (isExpense ? variance > 0 : variance < 0)
-        const draft = drafts[r.name]
+      {sec.entries.map(en => {
+        const rowProps = { sign, months, monthCount, showBudget, budgets, drafts, setDrafts, saveBudget, isExpense }
+        if (en.kind === 'row') return <AccountRow key={en.name} r={en} {...rowProps} />
         return (
-          <tr key={r.name} style={{ borderBottom:`1px solid #F0EEE9` }}>
-            <td style={{ ...cell.td, paddingLeft:22, position:'sticky', left:0, background:T.card }}>{r.name}</td>
-            {months.map(m => (
-              <td key={m} style={cell.num}>{fmtCell((r.byMonth[m] ?? 0) * sign)}</td>
-            ))}
-            <td style={{ ...cell.num, borderLeft:`2px solid ${T.border}`, fontWeight:600 }}>{fmtCell(r.total * sign)}</td>
-            {showBudget && <>
-              <td style={{ ...cell.num, borderLeft:`2px solid ${T.border}` }}>
-                <input
-                  style={{ width:70, padding:'2px 5px', border:`1px solid ${T.border}`, borderRadius:4, fontSize:10.5, textAlign:'right', outline:'none', background:'#fff' }}
-                  value={draft ?? (budget ?? '')}
-                  placeholder="—"
-                  onChange={e => setDrafts(p => ({ ...p, [r.name]: e.target.value }))}
-                  onBlur={() => {
-                    if (draft === undefined) return
-                    saveBudget(r.name, draft)
-                    setDrafts(p => { const c = { ...p }; delete c[r.name]; return c })
-                  }}
-                  onKeyDown={e => e.key === 'Enter' && e.currentTarget.blur()}
-                />
-              </td>
-              <td style={{ ...cell.num, color: variance == null ? '#c0bdb7' : bad ? T.danger : T.success, fontWeight: variance != null ? 600 : 400 }}>
-                {variance == null ? '—' : `${variance > 0 ? '+' : ''}${Math.round(variance).toLocaleString()}`}
-              </td>
-            </>}
-          </tr>
+          <Fragment key={en.name}>
+            {/* Parent label — figures live on the children and the subtotal */}
+            <tr style={{ borderBottom:`1px solid #F0EEE9` }}>
+              <td style={{ ...cell.td, paddingLeft:22, fontWeight:600, position:'sticky', left:0, background:T.card }}>{en.name}</td>
+              {months.map(m => <td key={m} style={cell.num}></td>)}
+              <td style={{ ...cell.num, borderLeft:`2px solid ${T.border}` }}></td>
+              {showBudget && <><td style={{ ...cell.num, borderLeft:`2px solid ${T.border}` }}></td><td style={cell.num}></td></>}
+            </tr>
+            {en.children.map(r => <AccountRow key={r.name} r={r} indent {...rowProps} />)}
+            {en.own && <AccountRow key={`${en.name} (other)`} r={en.own} label={`${en.name} (other)`} indent {...rowProps} />}
+            <tr style={{ borderBottom:`1px solid #F0EEE9` }}>
+              <td style={{ ...cell.td, paddingLeft:22, fontWeight:600, color:T.navy, position:'sticky', left:0, background:T.card }}>Total {en.name}</td>
+              {months.map(m => (
+                <td key={m} style={{ ...cell.num, fontWeight:600 }}>{fmtCell((en.totals[m] ?? 0) * sign)}</td>
+              ))}
+              <td style={{ ...cell.num, borderLeft:`2px solid ${T.border}`, fontWeight:700 }}>{fmtCell(en.total * sign)}</td>
+              {showBudget && <><td style={{ ...cell.num, borderLeft:`2px solid ${T.border}` }}></td><td style={cell.num}></td></>}
+            </tr>
+          </Fragment>
         )
       })}
       {/* Section subtotal */}
@@ -360,6 +389,46 @@ function SectionRows({ sec, sign, months, showBudget, budgets, drafts, setDrafts
         {showBudget && <><td style={cell.num}></td><td style={cell.num}></td></>}
       </tr>
     </>
+  )
+}
+
+// One account line. `indent` marks a sub-account row nested under a parent;
+// budgets stay keyed by the real account name even when the label is
+// overridden (the parent's "(other)" row).
+function AccountRow({ r, label, indent = false, sign, months, monthCount, showBudget, budgets, drafts, setDrafts, saveBudget, isExpense }) {
+  const avg = (r.total * sign) / monthCount
+  const budget = budgets[r.name]
+  const variance = budget != null ? avg - budget : null
+  // For expenses, over budget is bad; for revenue, under budget is bad
+  const bad = variance != null && (isExpense ? variance > 0 : variance < 0)
+  const draft = drafts[r.name]
+  return (
+    <tr style={{ borderBottom:`1px solid #F0EEE9` }}>
+      <td style={{ ...cell.td, paddingLeft: indent ? 38 : 22, position:'sticky', left:0, background:T.card }}>{label ?? r.name}</td>
+      {months.map(m => (
+        <td key={m} style={cell.num}>{fmtCell((r.byMonth[m] ?? 0) * sign)}</td>
+      ))}
+      <td style={{ ...cell.num, borderLeft:`2px solid ${T.border}`, fontWeight:600 }}>{fmtCell(r.total * sign)}</td>
+      {showBudget && <>
+        <td style={{ ...cell.num, borderLeft:`2px solid ${T.border}` }}>
+          <input
+            style={{ width:70, padding:'2px 5px', border:`1px solid ${T.border}`, borderRadius:4, fontSize:10.5, textAlign:'right', outline:'none', background:'#fff' }}
+            value={draft ?? (budget ?? '')}
+            placeholder="—"
+            onChange={e => setDrafts(p => ({ ...p, [r.name]: e.target.value }))}
+            onBlur={() => {
+              if (draft === undefined) return
+              saveBudget(r.name, draft)
+              setDrafts(p => { const c = { ...p }; delete c[r.name]; return c })
+            }}
+            onKeyDown={e => e.key === 'Enter' && e.currentTarget.blur()}
+          />
+        </td>
+        <td style={{ ...cell.num, color: variance == null ? '#c0bdb7' : bad ? T.danger : T.success, fontWeight: variance != null ? 600 : 400 }}>
+          {variance == null ? '—' : `${variance > 0 ? '+' : ''}${Math.round(variance).toLocaleString()}`}
+        </td>
+      </>}
+    </tr>
   )
 }
 

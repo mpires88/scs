@@ -1,26 +1,8 @@
 import { supabase, isMissingSchemaError } from './supabase'
 
-export const PL_SECTIONS = [
-  'Revenue',
-  'Deductions to Income',
-  'Cost of Goods Sold',
-  'Operating Expenses',
-  'Non-Operating Income',
-  'Non-Operating Expenses',
-]
-
-export const BS_SECTIONS = [
-  'Current Assets',
-  'Non-Current Assets',
-  'Current Liabilities',
-  'Non-Current Liabilities',
-  'Equity',
-]
-
-export const ALL_SECTIONS = [...PL_SECTIONS, ...BS_SECTIONS]
-
-export const isPLSection = s => PL_SECTIONS.includes(s)
-export const isBSSection = s => BS_SECTIONS.includes(s)
+// Section constants live in sections.js (supabase-free for pure libs/tests);
+// re-exported here so existing imports keep working.
+export { PL_SECTIONS, BS_SECTIONS, ALL_SECTIONS, isPLSection, isBSSection } from './sections'
 
 const DEFAULT_PL_ACCOUNTS = [
   // Revenue

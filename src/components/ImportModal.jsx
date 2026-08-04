@@ -6,6 +6,8 @@ import {
   DATE_FORMATS, STANDARD_FIELDS, DEFAULT_CFG, loadAllMappings, saveBankMapping,
 } from '../lib/csv'
 import { dominantCat, buildDescCatMap, resolveImportCategory, groupStatus } from '../lib/categorize'
+import { getSetting } from '../lib/settings'
+import { matchLedgerAccount } from '../lib/balanceSheet'
 import CategoryInput from './CategoryInput'
 import { T, fmt2 } from '../lib/theme'
 
@@ -17,8 +19,13 @@ export default function ImportModal({ clientId, allCats, groupedCats = null, exi
   const [cfg,        setCfg]        = useState(DEFAULT_CFG)
   const [stmt,       setStmt]       = useState(null)
   const [stmtBusy,   setStmtBusy]   = useState(false)
-  const [acctLabel,  setAcctLabel]  = useState('')
   const [withInt,    setWithInt]    = useState(true)
+  // Physical bank/card accounts (client_settings 'ledger_accounts'). Picking one
+  // stamps its canonical feed label, so a statement can't invent a new spelling
+  // and split one account into two balance-sheet lines.
+  const [registry,   setRegistry]   = useState([])
+  const [acctChoice, setAcctChoice] = useState('')   // '' | '__raw__' | '__column__' | registry key
+  const [rawLabel,   setRawLabel]   = useState('')   // label detected on the statement
   const [mapError,   setMapError]   = useState('')
   const [parsed,     setParsed]     = useState([])
   const [parseErrs,  setParseErrs]  = useState([])
@@ -35,6 +42,22 @@ export default function ImportModal({ clientId, allCats, groupedCats = null, exi
   const [showInstr,  setShowInstr]  = useState(false)
   const fileRef = useRef(null)
 
+  useEffect(() => {
+    let cancelled = false
+    getSetting(clientId, 'ledger_accounts', []).catch(() => [])
+      .then(v => { if (!cancelled) setRegistry(Array.isArray(v) ? v : []) })
+    return () => { cancelled = true }
+  }, [clientId])
+
+  // The value written to bank_transactions.account. Always a label the registry
+  // already matches, so the balance sheet folds the rows into the right line.
+  const feedLabel = useCallback(choice => {
+    if (choice === '__raw__') return rawLabel.trim()
+    const entry = registry.find(e => e.key === choice)
+    if (!entry) return ''
+    return (entry.matches || []).map(m => (m || '').trim()).find(Boolean) || (entry.label || '').trim()
+  }, [registry, rawLabel])
+
   const handleFile = useCallback(async file => {
     if (!file) return
     const name = file.name.toLowerCase()
@@ -50,8 +73,12 @@ export default function ImportModal({ clientId, allCats, groupedCats = null, exi
           setMapError('No transactions found in this PDF. It may be a scanned image, or a statement layout this reader does not know — export a CSV from your bank instead.')
           return
         }
-        setSource('pdf'); setStmt(result)
-        setAcctLabel(result.card.label || '')
+        // Pre-select the account whose registry entry already claims the label
+        // printed on the statement; otherwise offer the raw label as-is.
+        const detected = result.card.label || ''
+        const matched = matchLedgerAccount(registry, detected)
+        setSource('pdf'); setStmt(result); setRawLabel(detected)
+        setAcctChoice(matched ? matched.key : (detected ? '__raw__' : ''))
         setWithInt(true); setStep('statement')
       } catch (e) {
         setMapError(`Could not read the PDF: ${e.message}`)
@@ -71,7 +98,7 @@ export default function ImportModal({ clientId, allCats, groupedCats = null, exi
       setCsv(data); setCfg({ ...base, cols: { ...base.cols, ...cols }, splitAmounts }); setMapError(''); setStep('mapping')
     }
     reader.readAsText(file)
-  }, [])
+  }, [registry])
 
   const unbundle = useCallback((fromGroupKey, row) => {
     const uniqueKey = `unbundled_${Date.now()}_${Math.random().toString(36).slice(2)}`
@@ -117,9 +144,13 @@ export default function ImportModal({ clientId, allCats, groupedCats = null, exi
         if (isNaN(amount)) { errors.push({ line, msg: `Invalid amount "${raw[cols.amount]}"` }); return }
         if (debitsPositive) amount = -amount
       }
+      // A chosen account applies to the whole file and beats the mapped column,
+      // which is what a single-account statement export needs.
+      const chosenAcct = acctChoice && acctChoice !== '__column__' ? feedLabel(acctChoice) : ''
       rows.push({
         transaction_date: date, description: rawDesc, amount,
-        ...(cols.account      && raw[cols.account]      ? { account:      raw[cols.account].trim()      } : {}),
+        ...(chosenAcct                                  ? { account:      chosenAcct                    }
+          : cols.account      && raw[cols.account]      ? { account:      raw[cols.account].trim()      } : {}),
         ...(cols.reference_id && raw[cols.reference_id] ? { reference_id: raw[cols.reference_id].trim() } : {}),
         ...(cols.category     && raw[cols.category]     ? { category:     raw[cols.category].trim()     } : {}),
         ...(clientId !== null ? { client_id: clientId } : {}),
@@ -132,7 +163,7 @@ export default function ImportModal({ clientId, allCats, groupedCats = null, exi
   // review table and the import share one source of truth.
   const stmtRows = useMemo(() => {
     if (!stmt) return []
-    const acct = acctLabel.trim()
+    const acct = feedLabel(acctChoice)
     return [...stmt.rows, ...(withInt ? stmt.interest : [])]
       .filter(r => r.transaction_date)
       .map(r => ({
@@ -143,7 +174,7 @@ export default function ImportModal({ clientId, allCats, groupedCats = null, exi
         ...(clientId !== null ? { client_id: clientId } : {}),
       }))
       .sort((a, b) => a.transaction_date.localeCompare(b.transaction_date))
-  }, [stmt, acctLabel, withInt, clientId])
+  }, [stmt, acctChoice, feedLabel, withInt, clientId])
 
   const onApplyStatement = () => {
     // A row with no date means the billing period never parsed — surface it
@@ -377,6 +408,19 @@ export default function ImportModal({ clientId, allCats, groupedCats = null, exi
                 {' '}· columns: <em>{csv.headers.join(', ')}</em>
               </p>
 
+              <ISection title="Account">
+                <IRow label={<>Account<span style={{ color: '#dc2626' }}> *</span></>}>
+                  <AccountSelect
+                    registry={registry} value={acctChoice} onChange={setAcctChoice}
+                    columnOption={!!cfg.cols.account}
+                  />
+                </IRow>
+                <p style={{ fontSize: 12, color: '#6b7280', margin: '0 0 0 232px' }}>
+                  Which real bank or card account this file came from. Applies to every row
+                  {cfg.cols.account ? ' and overrides the mapped Account column.' : '.'}
+                </p>
+              </ISection>
+
               <ISection title="Bank">
                 <IRow label="Saved banks">
                   <select style={m.select} value={bankDDVal}
@@ -480,12 +524,16 @@ export default function ImportModal({ clientId, allCats, groupedCats = null, exi
               )}
 
               <ISection title="Statement">
-                <IRow label="Account label">
-                  <input style={m.input} value={acctLabel} onChange={e => setAcctLabel(e.target.value)}
-                    placeholder="e.g. Capital One …3877" />
+                <IRow label={<>Account<span style={{ color: '#dc2626' }}> *</span></>}>
+                  <AccountSelect
+                    registry={registry} value={acctChoice} onChange={setAcctChoice}
+                    rawLabel={rawLabel} rawHint="detected on this statement"
+                  />
                 </IRow>
                 <p style={{ fontSize: 12, color: '#6b7280', margin: '0 0 8px 232px' }}>
-                  Stored on every row so card spending stays separable from the bank account.
+                  {acctChoice === '__raw__'
+                    ? <>Not one of your accounts — these rows will show as unmapped on the balance sheet. Add it on the Chart of Accounts page to fold it in.</>
+                    : <>Stored on every row so card spending stays separable from the bank account.</>}
                 </p>
                 {stmt.interest.length > 0 && (
                   <>
@@ -624,8 +672,8 @@ export default function ImportModal({ clientId, allCats, groupedCats = null, exi
                                       />
                                     </td>
                                     <td style={{ ...m.td, textAlign: 'right', color: '#9ca3af', fontSize: 13 }}>{g.txns.length}</td>
-                                    <td style={{ ...m.td, textAlign: 'right', fontVariantNumeric: 'tabular-nums', color: g.total < 0 ? '#dc2626' : '#16a34a' }}>
-                                      {g.total.toFixed(2)}
+                                    <td style={{ ...m.td, textAlign: 'right', fontVariantNumeric: 'tabular-nums', whiteSpace: 'nowrap', color: g.total < 0 ? '#dc2626' : '#16a34a' }}>
+                                      {fmt2(g.total)}
                                     </td>
                                     <td style={m.td}>
                                       <button style={m.expandBtn} onClick={() => setExpanded(p => ({ ...p, [g.key]: !p[g.key] }))}>
@@ -655,8 +703,8 @@ export default function ImportModal({ clientId, allCats, groupedCats = null, exi
                                                 <tr key={ri} style={{ background: '#fff' }}>
                                                   <td style={{ ...m.td, padding: '4px 8px', whiteSpace: 'nowrap' }}>{r.transaction_date}</td>
                                                   <td style={{ ...m.td, padding: '4px 8px', maxWidth: 340, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{r.description}</td>
-                                                  <td style={{ ...m.td, padding: '4px 8px', textAlign: 'right', fontVariantNumeric: 'tabular-nums', color: r.amount < 0 ? '#dc2626' : '#16a34a' }}>
-                                                    {r.amount.toFixed(2)}
+                                                  <td style={{ ...m.td, padding: '4px 8px', textAlign: 'right', fontVariantNumeric: 'tabular-nums', whiteSpace: 'nowrap', color: r.amount < 0 ? '#dc2626' : '#16a34a' }}>
+                                                    {fmt2(r.amount)}
                                                   </td>
                                                   <td style={{ ...m.td, padding: '2px 6px', width: 28 }}>
                                                     {g.txns.length > 1 && (
@@ -734,6 +782,37 @@ export default function ImportModal({ clientId, allCats, groupedCats = null, exi
 }
 
 // ─── Sub-components ───────────────────────────────────────────────────────────
+
+// Picks the physical bank/card account a file belongs to, from the ledger-account
+// registry. Free text is deliberately not offered: every new spelling of an
+// account becomes its own balance-sheet line, so the list is the whole point.
+// `rawLabel` is the one exception — a label a statement printed that the registry
+// doesn't know yet, kept selectable so an import is never blocked by setup.
+function AccountSelect({ registry, value, onChange, rawLabel = '', rawHint = '', columnOption = false }) {
+  const known = registry.some(e => e.key === value)
+  return (
+    <>
+      <select style={m.select} value={value} onChange={e => onChange(e.target.value)}>
+        <option value="">— no account —</option>
+        {registry.map(e => (
+          <option key={e.key} value={e.key}>
+            {e.label}{e.type ? ` (${e.type})` : ''}
+          </option>
+        ))}
+        {columnOption && <option value="__column__">Use the mapped Account column</option>}
+        {rawLabel && !known && (
+          <option value="__raw__">{rawLabel}{rawHint ? ` — ${rawHint}` : ''}</option>
+        )}
+      </select>
+      {registry.length === 0 && (
+        <p style={{ fontSize: 11, color: '#92400E', margin: '5px 0 0' }}>
+          No bank or card accounts set up yet — add them on the Chart of Accounts page so
+          imports land on the right balance-sheet line.
+        </p>
+      )}
+    </>
+  )
+}
 
 function ISection({ title, children }) {
   return (

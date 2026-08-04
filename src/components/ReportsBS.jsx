@@ -1,0 +1,284 @@
+'use client'
+
+// Balance Sheet — point-in-time balances at each month end of the selected
+// year, assembled by lib/balanceSheet.js from the full transaction ledger
+// (including uncategorized rows, so the sheet always balances).
+
+import { useState, useEffect, useMemo, Fragment } from 'react'
+import { supabase, fetchAll } from '../lib/supabase'
+import { fetchAccounts } from '../lib/chartOfAccounts'
+import { getSetting } from '../lib/settings'
+import { buildBalanceSheet, balanceSheetYears } from '../lib/balanceSheet'
+import { groupRowsByParent } from '../lib/plGrouping'
+import { T, MON } from '../lib/theme'
+
+const fmtCell = n => {
+  if (n == null || n === 0) return '—'
+  const neg = n < 0
+  const str = Math.abs(Math.round(n)).toLocaleString()
+  return neg ? `(${str})` : str
+}
+
+export default function ReportsBS({ clientId }) {
+  const [txns,     setTxns]     = useState([])
+  const [accounts, setAccounts] = useState([])
+  const [registry, setRegistry] = useState([])
+  const [loading,  setLoading]  = useState(true)
+  const [error,    setError]    = useState(null)
+  const [year,     setYear]     = useState(null)
+
+  useEffect(() => {
+    let cancelled = false
+    ;(async () => {
+      setLoading(true); setError(null)
+      try {
+        // No category filter: uncategorized rows are still cash movements.
+        const [rows, coa, reg] = await Promise.all([
+          fetchAll(() => supabase.from('bank_transactions')
+            .select('transaction_date, amount, category, account')
+            .eq('client_id', clientId)
+            .order('transaction_date').order('id')),
+          fetchAccounts(clientId),
+          getSetting(clientId, 'ledger_accounts', []).catch(() => []),
+        ])
+        if (cancelled) return
+        setTxns(rows)
+        setAccounts(coa.accounts)
+        setRegistry(Array.isArray(reg) ? reg : [])
+        const yrs = balanceSheetYears(rows)
+        setYear(yrs[yrs.length - 1] ?? null)
+      } catch (e) {
+        if (!cancelled) setError(e.message)
+      }
+      if (!cancelled) setLoading(false)
+    })()
+    return () => { cancelled = true }
+  }, [clientId])
+
+  const years = useMemo(() => balanceSheetYears(txns), [txns])
+  const bs = useMemo(
+    () => buildBalanceSheet({ txns, accounts, year, registry }),
+    [txns, accounts, year, registry]
+  )
+  const entriesFor = useMemo(() => {
+    if (!bs) return {}
+    const map = {}
+    bs.sections.forEach(sec => { map[sec.section] = groupRowsByParent(sec.rows, accounts, sec.section) })
+    return map
+  }, [bs, accounts])
+
+  const exportCSV = () => {
+    if (!bs) return
+    const { months, sections, computed } = bs
+    const lines = [['Account', ...months.map(m => `${MON[m]} ${year}`)]]
+    const rowLine = (label, r) => lines.push([label, ...months.map(m => (r.byMonth[m] ?? 0).toFixed(2))])
+    sections.forEach(sec => {
+      if (!sec.rows.length) return
+      lines.push([sec.section])
+      entriesFor[sec.section].forEach(en => {
+        if (en.kind === 'row') { rowLine(`  ${en.name}`, en); return }
+        lines.push([`  ${en.name}`])
+        en.children.forEach(r => rowLine(`    ${r.name}`, r))
+        if (en.own) rowLine(`    ${en.name} (other)`, en.own)
+        lines.push([`  Total ${en.name}`, ...months.map(m => (en.totals[m] ?? 0).toFixed(2))])
+      })
+      lines.push([`Total ${sec.section}`, ...months.map(m => (sec.totals[m] ?? 0).toFixed(2))])
+      if (sec.section === 'Non-Current Assets')      lines.push(['TOTAL ASSETS',      ...months.map(m => computed.assets.byMonth[m].toFixed(2))])
+      if (sec.section === 'Non-Current Liabilities') lines.push(['TOTAL LIABILITIES', ...months.map(m => computed.liabilities.byMonth[m].toFixed(2))])
+      if (sec.section === 'Equity')                  lines.push(['TOTAL EQUITY',      ...months.map(m => computed.equity.byMonth[m].toFixed(2))])
+    })
+    lines.push(['LIABILITIES + EQUITY', ...months.map(m => computed.liabEquity.byMonth[m].toFixed(2))])
+    const csv = lines.map(row => row.map(cell => `"${String(cell).replace(/"/g, '""')}"`).join(',')).join('\r\n')
+    const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' })
+    const url = URL.createObjectURL(blob)
+    const a = document.createElement('a')
+    a.href = url
+    a.download = `SCS-BalanceSheet-${year}.csv`
+    a.click()
+    URL.revokeObjectURL(url)
+  }
+
+  if (loading) return (
+    <div style={{ display:'flex', alignItems:'center', justifyContent:'center', minHeight:300, background:T.page }}>
+      <style>{`@keyframes spin { to { transform: rotate(360deg) } }`}</style>
+      <div style={{ width:28, height:28, border:`2px solid ${T.border}`, borderTopColor:T.navy, borderRadius:'50%', animation:'spin .7s linear infinite' }} />
+    </div>
+  )
+
+  if (error) return (
+    <div style={{ padding:28 }}>
+      <div style={{ background:'#FDE8E8', border:'1px solid #F5C2C2', borderRadius:6, padding:'10px 14px', fontSize:12, color:'#991B1B' }}>
+        Failed to load: {error}
+      </div>
+    </div>
+  )
+
+  return (
+    <div style={{ background:T.page, minHeight:'100%', fontFamily:'-apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif', colorScheme:'light' }}>
+      <style>{`
+        @media print {
+          aside, .bs-controls { display: none !important; }
+          body { background: #fff !important; }
+        }
+      `}</style>
+
+      <header style={{ display:'flex', justifyContent:'space-between', alignItems:'flex-start', padding:'14px 28px', background:T.card, borderBottom:`1px solid ${T.border}`, flexWrap:'wrap', gap:10 }}>
+        <div>
+          <h2 style={{ fontSize:14, fontWeight:600, color:T.navy, margin:'0 0 2px' }}>Balance Sheet</h2>
+          <p style={{ fontSize:11, color:'rgba(74,74,74,0.65)', margin:0 }}>
+            Sports Card Station {year ? `· ${year}` : ''} · balances as of each month end
+          </p>
+        </div>
+        <div className="bs-controls" style={{ display:'flex', gap:8, alignItems:'center', flexWrap:'wrap' }}>
+          <button style={btn.sec} onClick={exportCSV} disabled={!bs}>↓ Export CSV</button>
+          <button style={btn.sec} onClick={() => window.print()} disabled={!bs}>🖨 Print / PDF</button>
+        </div>
+      </header>
+
+      <div style={{ padding:'20px 28px' }}>
+
+        {years.length > 1 && (
+          <div className="bs-controls" style={{ display:'flex', gap:4, marginBottom:16 }}>
+            {years.map(y => (
+              <button key={y} onClick={() => setYear(y)}
+                style={{
+                  padding:'5px 14px', borderRadius:5, fontSize:11, cursor:'pointer',
+                  border:`1px solid ${year === y ? T.navy : T.border}`,
+                  background: year === y ? T.navy : '#fff',
+                  color: year === y ? '#fff' : T.charcoal,
+                  fontWeight: year === y ? 600 : 400,
+                }}>{y}</button>
+            ))}
+          </div>
+        )}
+
+        {!bs ? (
+          <p style={{ color:'#9ca3af', fontSize:13, textAlign:'center', padding:'48px 0' }}>
+            No transactions yet — import bank activity to build the balance sheet.
+          </p>
+        ) : (
+          <div style={{ overflowX:'auto', background:T.card, border:`1px solid ${T.border}`, borderRadius:7 }}>
+            <table style={{ borderCollapse:'collapse', width:'100%', fontSize:11.5 }}>
+              <thead>
+                <tr>
+                  <th style={{ ...cell.th, textAlign:'left', minWidth:230, position:'sticky', left:0, background:T.page, zIndex:1 }}>Account</th>
+                  {bs.months.map(m => (
+                    <th key={m} style={{ ...cell.th, textAlign:'right', minWidth:78 }}>{MON[m]} {String(year).slice(2)}</th>
+                  ))}
+                </tr>
+              </thead>
+              <tbody>
+                {bs.sections.map(sec => {
+                  const computedAfter = {
+                    'Non-Current Assets':      ['TOTAL ASSETS',      bs.computed.assets],
+                    'Non-Current Liabilities': ['TOTAL LIABILITIES', bs.computed.liabilities],
+                    'Equity':                  ['TOTAL EQUITY',      bs.computed.equity],
+                  }[sec.section]
+                  return (
+                    <Fragment key={sec.section}>
+                      {sec.rows.length > 0 && (
+                        <>
+                          <tr>
+                            <td colSpan={999} style={{ padding:'9px 12px 4px', fontSize:9.5, fontWeight:700, color:T.gold, textTransform:'uppercase', letterSpacing:'.07em', background:T.card }}>
+                              {sec.section}
+                            </td>
+                          </tr>
+                          {entriesFor[sec.section].map(en => {
+                            if (en.kind === 'row') return <BsRow key={en.name} r={en} months={bs.months} />
+                            return (
+                              <Fragment key={en.name}>
+                                <tr style={{ borderBottom:`1px solid #F0EEE9` }}>
+                                  <td style={{ ...cell.td, paddingLeft:22, fontWeight:600, position:'sticky', left:0, background:T.card }}>{en.name}</td>
+                                  {bs.months.map(m => <td key={m} style={cell.num}></td>)}
+                                </tr>
+                                {en.children.map(r => <BsRow key={r.name} r={r} months={bs.months} indent />)}
+                                {en.own && <BsRow key={`${en.name} (other)`} r={en.own} label={`${en.name} (other)`} months={bs.months} indent />}
+                                <tr style={{ borderBottom:`1px solid #F0EEE9` }}>
+                                  <td style={{ ...cell.td, paddingLeft:22, fontWeight:600, color:T.navy, position:'sticky', left:0, background:T.card }}>Total {en.name}</td>
+                                  {bs.months.map(m => (
+                                    <td key={m} style={{ ...cell.num, fontWeight:600 }}>{fmtCell(en.totals[m] ?? 0)}</td>
+                                  ))}
+                                </tr>
+                              </Fragment>
+                            )
+                          })}
+                          <tr style={{ background:T.page, borderBottom:`1px solid ${T.border}` }}>
+                            <td style={{ ...cell.td, fontWeight:600, color:T.navy, position:'sticky', left:0, background:T.page }}>Total {sec.section}</td>
+                            {bs.months.map(m => (
+                              <td key={m} style={{ ...cell.num, fontWeight:600, color:T.navy }}>{fmtCell(sec.totals[m])}</td>
+                            ))}
+                          </tr>
+                        </>
+                      )}
+                      {computedAfter && (
+                        <tr style={{ background:'#EBF1F7', borderBottom:`2px solid #B8CDE0` }}>
+                          <td style={{ ...cell.td, fontWeight:700, color:T.navy, position:'sticky', left:0, background:'#EBF1F7' }}>{computedAfter[0]}</td>
+                          {bs.months.map(m => {
+                            const v = computedAfter[1].byMonth[m]
+                            return <td key={m} style={{ ...cell.num, fontWeight:600, color: v < 0 ? T.danger : T.navy }}>{fmtCell(v)}</td>
+                          })}
+                        </tr>
+                      )}
+                    </Fragment>
+                  )
+                })}
+                <tr style={{ background:T.navy }}>
+                  <td style={{ ...cell.td, position:'sticky', left:0, background:T.navy, color:'#fff', fontWeight:700, fontSize:11.5 }}>LIABILITIES + EQUITY</td>
+                  {bs.months.map(m => {
+                    const v = bs.computed.liabEquity.byMonth[m]
+                    return <td key={m} style={{ ...cell.num, color:'#A7F3D0', fontWeight:600 }}>{fmtCell(v)}</td>
+                  })}
+                </tr>
+              </tbody>
+            </table>
+          </div>
+        )}
+
+        {bs && (
+          <p style={{ fontSize:10.5, color:'rgba(74,74,74,0.55)', marginTop:10, lineHeight:1.6 }}>
+            Balances are as of each month end, accumulated from the full transaction history.
+            Bank and card accounts come from the account registry (Chart of Accounts page); their
+            balances fold in every mapped feed label plus bound transfer categories. Retained
+            Earnings is cumulative net income from the P&amp;L. Total Assets equals Liabilities +
+            Equity by construction.
+            {bs.hasUncat && ' ⚠ Uncategorized transactions are shown as their own equity line — categorize them to clear it.'}
+            {bs.unmappedLabels.length > 0 && ` ⚠ Unmapped account label${bs.unmappedLabels.length !== 1 ? 's' : ''}: ${bs.unmappedLabels.join(', ')} — map ${bs.unmappedLabels.length !== 1 ? 'them' : 'it'} on the Chart of Accounts page so the lines merge correctly.`}
+          </p>
+        )}
+      </div>
+    </div>
+  )
+}
+
+function BsRow({ r, label, indent = false, months }) {
+  return (
+    <tr style={{ borderBottom:`1px solid #F0EEE9` }}>
+      <td style={{
+        ...cell.td, paddingLeft: indent ? 38 : 22, position:'sticky', left:0, background:T.card,
+        ...(r.warn ? { color:'#92400E', fontWeight:600 } : {}),
+        ...(r.derived && !r.warn && !r.unmapped ? { fontStyle:'italic' } : {}),
+      }}>
+        {label ?? r.name}
+        {r.unmapped && (
+          <span title="This feed label isn't in the account registry — map it on the Chart of Accounts page."
+            style={{ marginLeft:8, fontSize:9.5, fontWeight:700, color:'#92400E', background:'#FEF3C7', borderRadius:3, padding:'1px 7px', whiteSpace:'nowrap' }}>
+            ⚠ unmapped
+          </span>
+        )}
+      </td>
+      {months.map(m => (
+        <td key={m} style={{ ...cell.num, ...(r.warn ? { color:'#92400E' } : {}) }}>{fmtCell(r.byMonth[m] ?? 0)}</td>
+      ))}
+    </tr>
+  )
+}
+
+const cell = {
+  th:  { padding:'8px 12px', background:T.page, fontSize:9.5, fontWeight:700, color:T.gold, textTransform:'uppercase', letterSpacing:'.06em', whiteSpace:'nowrap', borderBottom:`2px solid ${T.border}` },
+  td:  { padding:'5px 12px', fontSize:11.5, color:T.charcoal, whiteSpace:'nowrap' },
+  num: { padding:'5px 12px', fontSize:11.5, color:T.charcoal, textAlign:'right', fontVariantNumeric:'tabular-nums', whiteSpace:'nowrap' },
+}
+
+const btn = {
+  sec: { padding:'6px 14px', background:'#fff', color:T.charcoal, border:`1px solid ${T.border}`, borderRadius:5, fontSize:11, fontWeight:500, cursor:'pointer' },
+}
