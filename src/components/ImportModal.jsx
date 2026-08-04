@@ -7,13 +7,18 @@ import {
 } from '../lib/csv'
 import { dominantCat, buildDescCatMap } from '../lib/categorize'
 import CategoryInput from './CategoryInput'
-import { T } from '../lib/theme'
+import { T, fmt2 } from '../lib/theme'
 
 export default function ImportModal({ clientId, allCats, groupedCats = null, existingTxns, onDone, onClose }) {
   const [step,       setStep]       = useState('upload')
+  const [source,     setSource]     = useState('csv')
   const [dragOver,   setDragOver]   = useState(false)
   const [csv,        setCsv]        = useState(null)
   const [cfg,        setCfg]        = useState(DEFAULT_CFG)
+  const [stmt,       setStmt]       = useState(null)
+  const [stmtBusy,   setStmtBusy]   = useState(false)
+  const [acctLabel,  setAcctLabel]  = useState('')
+  const [withInt,    setWithInt]    = useState(true)
   const [mapError,   setMapError]   = useState('')
   const [parsed,     setParsed]     = useState([])
   const [parseErrs,  setParseErrs]  = useState([])
@@ -27,9 +32,31 @@ export default function ImportModal({ clientId, allCats, groupedCats = null, exi
   const [showInstr,  setShowInstr]  = useState(false)
   const fileRef = useRef(null)
 
-  const handleFile = useCallback(file => {
+  const handleFile = useCallback(async file => {
     if (!file) return
-    if (!file.name.toLowerCase().endsWith('.csv')) { setMapError('Please select a .csv file'); return }
+    const name = file.name.toLowerCase()
+
+    // Card statement PDFs arrive already normalized (date/description/amount),
+    // so they skip column mapping and go straight to a review step.
+    if (name.endsWith('.pdf')) {
+      setMapError(''); setStmtBusy(true)
+      try {
+        const { extractPdfLines, parseCardStatement } = await import('../lib/pdfStatement')
+        const result = parseCardStatement(await extractPdfLines(await file.arrayBuffer()))
+        if (!result.rows.length && !result.interest.length) {
+          setMapError('No transactions found in this PDF. It may be a scanned image, or a statement layout this reader does not know — export a CSV from your bank instead.')
+          return
+        }
+        setSource('pdf'); setStmt(result)
+        setAcctLabel(result.card.label || '')
+        setWithInt(true); setStep('statement')
+      } catch (e) {
+        setMapError(`Could not read the PDF: ${e.message}`)
+      } finally { setStmtBusy(false) }
+      return
+    }
+
+    if (!name.endsWith('.csv')) { setMapError('Please select a .csv or .pdf file'); return }
     const reader = new FileReader()
     reader.onload = e => {
       const data = parseBankCSV(e.target.result)
@@ -37,6 +64,7 @@ export default function ImportModal({ clientId, allCats, groupedCats = null, exi
 
       const { cols, splitAmounts } = autoDetectCols(data.headers)
       const base = DEFAULT_CFG()
+      setSource('csv')
       setCsv(data); setCfg({ ...base, cols: { ...base.cols, ...cols }, splitAmounts }); setMapError(''); setStep('mapping')
     }
     reader.readAsText(file)
@@ -97,6 +125,32 @@ export default function ImportModal({ clientId, allCats, groupedCats = null, exi
     setParsed(rows); setParseErrs(errors); setStep('categorize')
   }
 
+  // Rows the statement will contribute, in date order. Kept as a memo so the
+  // review table and the import share one source of truth.
+  const stmtRows = useMemo(() => {
+    if (!stmt) return []
+    const acct = acctLabel.trim()
+    return [...stmt.rows, ...(withInt ? stmt.interest : [])]
+      .filter(r => r.transaction_date)
+      .map(r => ({
+        transaction_date: r.transaction_date,
+        description: r.description,
+        amount: r.amount,
+        ...(acct ? { account: acct } : {}),
+        ...(clientId !== null ? { client_id: clientId } : {}),
+      }))
+      .sort((a, b) => a.transaction_date.localeCompare(b.transaction_date))
+  }, [stmt, acctLabel, withInt, clientId])
+
+  const onApplyStatement = () => {
+    // A row with no date means the billing period never parsed — surface it
+    // rather than dropping the transaction on the floor.
+    const undated = [...stmt.rows, ...(withInt ? stmt.interest : [])].filter(r => !r.transaction_date)
+    setParsed(stmtRows)
+    setParseErrs(undated.map(r => ({ line: '—', msg: `Could not determine a date for "${r.description}"` })))
+    setStep('categorize')
+  }
+
   // Build dedup + suggestions when entering categorize step
   useEffect(() => {
     if (step !== 'categorize') return
@@ -149,7 +203,7 @@ export default function ImportModal({ clientId, allCats, groupedCats = null, exi
         setToInsert(newRows); setDupCount(dupes.length)
         setNewGroups(clusters); setCatAssign(initAssign)
       } catch (e) {
-        alert('Error: ' + e.message); setStep('mapping')
+        alert('Error: ' + e.message); setStep(source === 'pdf' ? 'statement' : 'mapping')
       } finally {
         if (!cancelled) setCatLoading(false)
       }
@@ -202,8 +256,9 @@ export default function ImportModal({ clientId, allCats, groupedCats = null, exi
       <div style={m.modal}>
         <div style={m.head}>
           <h3 style={m.title}>
-            {step === 'upload'     && 'Import CSV'}
+            {step === 'upload'     && 'Import Transactions'}
             {step === 'mapping'    && 'Map Columns'}
+            {step === 'statement'  && 'Review Statement'}
             {step === 'categorize' && 'Preview & Categorize'}
             {step === 'uploading'  && 'Uploading…'}
             {step === 'result'     && 'Import Complete'}
@@ -218,25 +273,36 @@ export default function ImportModal({ clientId, allCats, groupedCats = null, exi
           {step === 'upload' && (
             <div>
               <div
-                style={{ ...m.dropzone, ...(dragOver ? m.dropzoneOn : {}) }}
-                onDrop={e => { e.preventDefault(); setDragOver(false); handleFile(e.dataTransfer.files[0]) }}
-                onDragOver={e => { e.preventDefault(); setDragOver(true) }}
+                style={{ ...m.dropzone, ...(dragOver ? m.dropzoneOn : {}), ...(stmtBusy ? { cursor: 'default' } : {}) }}
+                onDrop={e => { e.preventDefault(); setDragOver(false); if (!stmtBusy) handleFile(e.dataTransfer.files[0]) }}
+                onDragOver={e => { e.preventDefault(); if (!stmtBusy) setDragOver(true) }}
                 onDragLeave={() => setDragOver(false)}
-                onClick={() => fileRef.current.click()}
+                onClick={() => { if (!stmtBusy) fileRef.current.click() }}
               >
-                <svg width="36" height="36" viewBox="0 0 24 24" fill="none" stroke="#A08A3C" strokeWidth={1.25} strokeLinecap="round" strokeLinejoin="round" style={{ marginBottom: 14 }}>
-                  <path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/>
-                  <line x1="12" y1="11" x2="12" y2="17"/><polyline points="9 14 12 11 15 14"/>
-                </svg>
-                <p style={{ fontSize: 14, margin: '0 0 5px', color: T.navy, fontWeight: 500 }}>
-                  Drag &amp; drop a CSV file, or <strong>click to browse</strong>
-                </p>
-                <p style={{ fontSize: 11, color: T.charcoal, margin: 0, opacity: .7 }}>
-                  Supports most bank CSV exports — column mapping happens next
-                </p>
-                <input ref={fileRef} type="file" accept=".csv" style={{ display: 'none' }}
+                {stmtBusy ? (
+                  <>
+                    <div style={m.spinner} />
+                    <p style={{ fontSize: 13, margin: '14px 0 0', color: T.charcoal }}>Reading statement…</p>
+                  </>
+                ) : (
+                  <>
+                    <svg width="36" height="36" viewBox="0 0 24 24" fill="none" stroke="#A08A3C" strokeWidth={1.25} strokeLinecap="round" strokeLinejoin="round" style={{ marginBottom: 14 }}>
+                      <path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/>
+                      <line x1="12" y1="11" x2="12" y2="17"/><polyline points="9 14 12 11 15 14"/>
+                    </svg>
+                    <p style={{ fontSize: 14, margin: '0 0 5px', color: T.navy, fontWeight: 500 }}>
+                      Drag &amp; drop a CSV or PDF file, or <strong>click to browse</strong>
+                    </p>
+                    <p style={{ fontSize: 11, color: T.charcoal, margin: 0, opacity: .7 }}>
+                      Bank CSV exports map columns next · card statement PDFs are read automatically
+                    </p>
+                  </>
+                )}
+                <input ref={fileRef} type="file" accept=".csv,.pdf" style={{ display: 'none' }}
                   onChange={e => handleFile(e.target.files[0])} />
               </div>
+
+              {mapError && <div style={{ ...m.errBox, marginTop: 14, marginBottom: 0 }}>{mapError}</div>}
 
               {/* Collapsible instructions */}
               <div style={m.instrWrap}>
@@ -258,6 +324,14 @@ export default function ImportModal({ clientId, allCats, groupedCats = null, exi
                       <li>Set the date range for the month you want to import</li>
                       <li>Choose <strong>CSV</strong> as the format and click <strong>Download</strong></li>
                       <li>Upload the downloaded file here — column mapping is automatic</li>
+                    </ol>
+
+                    <p style={m.instrTitle}>Capital One card (PDF statement)</p>
+                    <ol style={m.instrList}>
+                      <li>Log in to <strong>capitalone.com</strong> and open the card account</li>
+                      <li>Go to <strong>Statements</strong> (or <strong>View Statements</strong>)</li>
+                      <li>Pick the billing period and click <strong>Download PDF</strong></li>
+                      <li>Upload the PDF here — dates, descriptions and amounts are read automatically</li>
                     </ol>
 
                     <p style={m.instrTitle}>Other banks</p>
@@ -367,6 +441,78 @@ export default function ImportModal({ clientId, allCats, groupedCats = null, exi
               <div style={m.actions}>
                 <button style={m.btnSec} onClick={() => setStep('upload')}>← Back</button>
                 <button style={m.btnPri} onClick={onApplyMapping}>Continue →</button>
+              </div>
+            </div>
+          )}
+
+          {/* Step 2b: Statement review (PDF) */}
+          {step === 'statement' && stmt && (
+            <div>
+              <p style={m.sub}>
+                {stmt.card.product || 'Card statement'}
+                {stmt.card.last4 && <> ending in {stmt.card.last4}</>}
+                {stmt.cycle && <> · {stmt.cycle.start} → {stmt.cycle.end}</>}
+              </p>
+
+              {stmt.warnings.length > 0 && (
+                <div style={m.warnBox}>
+                  <strong>Check these before importing:</strong>
+                  <ul style={{ margin: '6px 0 0', paddingLeft: 20 }}>
+                    {stmt.warnings.map((w, i) => <li key={i}>{w}</li>)}
+                  </ul>
+                </div>
+              )}
+
+              <ISection title="Statement">
+                <IRow label="Account label">
+                  <input style={m.input} value={acctLabel} onChange={e => setAcctLabel(e.target.value)}
+                    placeholder="e.g. Capital One …3877" />
+                </IRow>
+                <p style={{ fontSize: 12, color: '#6b7280', margin: '0 0 8px 232px' }}>
+                  Stored on every row so card spending stays separable from the bank account.
+                </p>
+                {stmt.interest.length > 0 && (
+                  <>
+                    <IRow label="Import interest charge">
+                      <input type="checkbox" checked={withInt} onChange={e => setWithInt(e.target.checked)} />
+                    </IRow>
+                    <p style={{ fontSize: 12, color: '#6b7280', margin: '0 0 0 232px' }}>
+                      {stmt.interest.map(i => `${i.description} ${fmt2(i.amount)}`).join(', ')} — dated to the statement close.
+                    </p>
+                  </>
+                )}
+              </ISection>
+
+              <div style={{ overflowX: 'auto', maxHeight: 320, overflowY: 'auto', border: `1px solid ${T.border}`, borderRadius: 6 }}>
+                <table style={m.table}>
+                  <thead>
+                    <tr>
+                      <th style={m.th}>Date</th>
+                      <th style={{ ...m.th, width: '99%' }}>Description</th>
+                      <th style={{ ...m.th, width: 110, textAlign: 'right' }}>Amount</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {stmtRows.map((r, i) => (
+                      <tr key={i} style={{ background: i % 2 === 0 ? '#fff' : '#f9fafb' }}>
+                        <td style={{ ...m.td, whiteSpace: 'nowrap' }}>{r.transaction_date}</td>
+                        <td style={{ ...m.td, maxWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{r.description}</td>
+                        <td style={{ ...m.td, textAlign: 'right', fontVariantNumeric: 'tabular-nums', whiteSpace: 'nowrap', color: r.amount < 0 ? '#dc2626' : '#16a34a' }}>
+                          {fmt2(r.amount)}
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+              <p style={{ fontSize: 11, color: T.charcoal, opacity: .7, margin: '8px 0 0' }}>
+                {stmtRows.length} row{stmtRows.length !== 1 ? 's' : ''} · charges are negative, payments and refunds positive.
+                Duplicates are checked in the next step.
+              </p>
+
+              <div style={m.actions}>
+                <button style={m.btnSec} onClick={() => { setStmt(null); setStep('upload') }}>← Back</button>
+                <button style={m.btnPri} onClick={onApplyStatement}>Continue →</button>
               </div>
             </div>
           )}
@@ -512,7 +658,7 @@ export default function ImportModal({ clientId, allCats, groupedCats = null, exi
                   )}
 
                   <div style={m.actions}>
-                    <button style={m.btnSec} onClick={() => setStep('mapping')}>← Back</button>
+                    <button style={m.btnSec} onClick={() => setStep(source === 'pdf' ? 'statement' : 'mapping')}>← Back</button>
                     {toInsert.length > 0 && (
                       <button style={m.btnPri} onClick={doUpload}>
                         Import {toInsert.length} transaction{toInsert.length !== 1 ? 's' : ''}
@@ -615,6 +761,7 @@ const m = {
   dropzoneOn: { border: `2px dashed ${T.navy}`, background: '#EBF1F7' },
   spinner:    { display: 'inline-block', width: 28, height: 28, border: `2px solid ${T.border}`, borderTopColor: T.navy, borderRadius: '50%', animation: 'spin .7s linear infinite' },
   errBox:     { background: '#FDE8E8', border: '1px solid #F5C2C2', borderRadius: 6, padding: '10px 14px', fontSize: 11, color: '#991B1B', marginBottom: 14 },
+  warnBox:    { background: '#FEF6E7', border: '1px solid #F3D9A4', borderRadius: 6, padding: '10px 14px', fontSize: 11, color: '#92400E', marginBottom: 14 },
   instrWrap:  { marginTop: 14, border: `1px solid ${T.border}`, borderRadius: 6, overflow: 'hidden' },
   instrToggle:{ display: 'flex', alignItems: 'center', width: '100%', padding: '9px 12px', background: T.page, border: 'none', cursor: 'pointer', fontSize: 12, color: T.charcoal, fontWeight: 500, gap: 4 },
   instrBody:  { padding: '14px 16px', background: '#fff', borderTop: `1px solid ${T.border}` },

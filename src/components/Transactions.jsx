@@ -516,7 +516,7 @@ export default function Transactions({ clientId = null }) {
             disabled={loadingMore}
             title={loadingMore ? 'Waiting for all transactions to load — duplicate detection needs the full list' : undefined}
             onClick={() => setShowImport(true)}
-          >↑ Import CSV</button>
+          >↑ Import CSV / PDF</button>
           <button
             style={{ ...s.btnPrimary, ...(pendingTxnCount === 0 || saving ? s.btnDisabled : {}) }}
             disabled={pendingTxnCount === 0 || saving}
