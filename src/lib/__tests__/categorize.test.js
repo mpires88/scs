@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest'
-import { dominantCat, groupStatus, buildDescCatMap } from '../categorize'
+import { dominantCat, groupStatus, buildDescCatMap, resolveImportCategory } from '../categorize'
 
 const savedCat = t => t.category || ''
 
@@ -50,6 +50,35 @@ describe('groupStatus', () => {
     const catOf = t => (t.id in assignments ? assignments[t.id] : (t.category || ''))
     const st = groupStatus([{ id: 'a', category: 'Fuel' }, { id: 'b', category: '' }], catOf)
     expect(st.kind).toBe('complete')
+  })
+})
+
+describe('resolveImportCategory', () => {
+  it("keeps a row's own imported category over the group's", () => {
+    // The regression that put rent in Inventory: a mostly-inventory cluster
+    // dominated the handful of rent rows sitting inside it.
+    expect(resolveImportCategory({ category: 'Rent' }, 'Inventory', false)).toBe('Rent')
+  })
+
+  it("falls back to the group's category for rows the source left blank", () => {
+    expect(resolveImportCategory({ category: '' }, 'Inventory', false)).toBe('Inventory')
+    expect(resolveImportCategory({}, 'Inventory', false)).toBe('Inventory')
+    expect(resolveImportCategory({ category: null }, 'Inventory', false)).toBe('Inventory')
+  })
+
+  it('lets a deliberate group edit override every row in the group', () => {
+    expect(resolveImportCategory({ category: 'Rent' }, 'Occupancy', true)).toBe('Occupancy')
+    expect(resolveImportCategory({ category: '' }, 'Occupancy', true)).toBe('Occupancy')
+  })
+
+  it('allows a touched group to clear categories, and trims', () => {
+    expect(resolveImportCategory({ category: 'Rent' }, '', true)).toBe('')
+    expect(resolveImportCategory({ category: '  Rent  ' }, '', false)).toBe('Rent')
+    expect(resolveImportCategory({ category: '' }, '  Inventory  ', false)).toBe('Inventory')
+  })
+
+  it('returns empty when neither side has a category', () => {
+    expect(resolveImportCategory({ category: '' }, '', false)).toBe('')
   })
 })
 

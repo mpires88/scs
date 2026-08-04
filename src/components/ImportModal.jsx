@@ -5,7 +5,7 @@ import {
   parseBankCSV, parseDate, fingerprint, autoDetectCols,
   DATE_FORMATS, STANDARD_FIELDS, DEFAULT_CFG, loadAllMappings, saveBankMapping,
 } from '../lib/csv'
-import { dominantCat, buildDescCatMap } from '../lib/categorize'
+import { dominantCat, buildDescCatMap, resolveImportCategory, groupStatus } from '../lib/categorize'
 import CategoryInput from './CategoryInput'
 import { T, fmt2 } from '../lib/theme'
 
@@ -27,6 +27,9 @@ export default function ImportModal({ clientId, allCats, groupedCats = null, exi
   const [dupCount,   setDupCount]   = useState(0)
   const [newGroups,  setNewGroups]  = useState([])
   const [catAssign,  setCatAssign]  = useState({})
+  // Groups the user actually edited. Only those override the per-row category
+  // the source file supplied — see resolveImportCategory.
+  const [catTouched, setCatTouched] = useState({})
   const [expanded,   setExpanded]   = useState({})
   const [result,     setResult]     = useState(null)
   const [showInstr,  setShowInstr]  = useState(false)
@@ -195,6 +198,10 @@ export default function ImportModal({ clientId, allCats, groupedCats = null, exi
 
         const initAssign = {}
         clusters.forEach(g => {
+          // A cluster holding several source categories is left blank on
+          // purpose: every row keeps its own. Pre-filling the dominant one
+          // would show a category the import is not going to use.
+          if (groupStatus(g.txns, t => (t.category || '').trim()).kind === 'mixed') return
           const importedCat = dominantCat(g.txns)
           if (importedCat)         initAssign[g.key] = importedCat
           else if (g.suggestedCat) initAssign[g.key] = g.suggestedCat
@@ -219,7 +226,8 @@ export default function ImportModal({ clientId, allCats, groupedCats = null, exi
       const txnCatMap = new Map()
       newGroups.forEach(group => {
         const cat = (catAssign[group.key] || '').trim()
-        group.txns.forEach(row => txnCatMap.set(row, cat))
+        const touched = !!catTouched[group.key]
+        group.txns.forEach(row => txnCatMap.set(row, resolveImportCategory(row, cat, touched)))
       })
       const rowsToSave = toInsert.map(row => {
         const cat = txnCatMap.get(row) || ''
@@ -246,10 +254,18 @@ export default function ImportModal({ clientId, allCats, groupedCats = null, exi
   const colOptions = csv ? csv.headers.map(h => <option key={h} value={h}>{h}</option>) : []
   const bankDDVal  = savedBanks.includes(cfg.bankName) ? cfg.bankName : ''
 
-  const uncatCount = useMemo(
-    () => newGroups.filter(g => !(catAssign[g.key] || '').trim()).length,
-    [newGroups, catAssign]
-  )
+  // Counted per row, not per group: a group left blank because its rows carry
+  // their own categories is fully categorized, and saying otherwise would push
+  // the user to overwrite exactly the rows this is meant to protect.
+  const uncatCount = useMemo(() => {
+    let n = 0
+    newGroups.forEach(g => {
+      const cat = (catAssign[g.key] || '').trim()
+      const touched = !!catTouched[g.key]
+      g.txns.forEach(row => { if (!resolveImportCategory(row, cat, touched)) n++ })
+    })
+    return n
+  }, [newGroups, catAssign, catTouched])
 
   return (
     <div style={m.overlay} onClick={e => { if (e.target === e.currentTarget) onClose() }}>
@@ -553,7 +569,7 @@ export default function ImportModal({ clientId, allCats, groupedCats = null, exi
                         {Object.keys(catAssign).length > 0 && <span>Purple dot = category suggested from previous transactions. Change any before importing.</span>}
                         {uncatCount > 0 && (
                           <span style={{ color: '#d97706' }}>
-                            {uncatCount} group{uncatCount !== 1 ? 's' : ''} without a category — they will import uncategorized. Use the <strong>Uncategorized</strong> filter on the transaction list to finish later.
+                            {uncatCount} transaction{uncatCount !== 1 ? 's' : ''} without a category — they will import uncategorized. Use the <strong>Uncategorized</strong> filter on the transaction list to finish later.
                           </span>
                         )}
                       </div>
@@ -573,6 +589,8 @@ export default function ImportModal({ clientId, allCats, groupedCats = null, exi
                               const cat    = catAssign[g.key] ?? ''
                               const isSugg = cat !== '' && cat === g.suggestedCat
                               const isExp  = !!expanded[g.key]
+                              const status = groupStatus(g.txns, t => (t.category || '').trim())
+                              const mixed  = !catTouched[g.key] && status.kind === 'mixed'
                               return (
                                 <Fragment key={g.key}>
                                   <tr style={{ background: i % 2 === 0 ? '#fff' : '#f9fafb' }}>
@@ -585,12 +603,21 @@ export default function ImportModal({ clientId, allCats, groupedCats = null, exi
                                         {g.variants?.length > 0 && (
                                           <span style={m.badge}>+{g.variants.length} similar</span>
                                         )}
+                                        {mixed && (
+                                          <span
+                                            style={m.mixedBadge}
+                                            title={`These transactions came in under ${status.distinct.size} different categories (${[...status.distinct].join(', ')}). Each row keeps its own. Typing a category here files all ${g.txns.length} of them under that one instead.`}
+                                          >{status.distinct.size} categories kept</span>
+                                        )}
                                       </div>
                                     </td>
                                     <td style={m.td}>
                                       <CategoryInput
                                         value={cat}
-                                        onChange={val => setCatAssign(p => ({ ...p, [g.key]: val }))}
+                                        onChange={val => {
+                                          setCatAssign(p => ({ ...p, [g.key]: val }))
+                                          setCatTouched(p => ({ ...p, [g.key]: true }))
+                                        }}
                                         categories={allCats}
                                         groups={groupedCats}
                                         style={isSugg ? { border: '1px solid #a78bfa', background: '#faf5ff' } : {}}
@@ -755,6 +782,7 @@ const m = {
   td:         { padding: '7px 10px', borderBottom: `1px solid ${T.border}`, verticalAlign: 'middle', fontSize: 12, color: T.charcoal },
   suggDot:    { flexShrink: 0, width: 6, height: 6, borderRadius: '50%', background: T.gold, display: 'inline-block' },
   badge:      { flexShrink: 0, fontSize: 10, fontWeight: 500, color: '#4A7BA7', background: '#E8EFF5', borderRadius: 3, padding: '1px 6px', whiteSpace: 'nowrap', cursor: 'default' },
+  mixedBadge: { flexShrink: 0, fontSize: 10, fontWeight: 600, color: '#92400E', background: '#FEF3C7', borderRadius: 3, padding: '1px 6px', whiteSpace: 'nowrap', cursor: 'help' },
   expandBtn:  { background: 'none', border: 'none', cursor: 'pointer', color: '#9ca3af', fontSize: 10, padding: '2px 5px', lineHeight: 1 },
   unbundleBtn:{ fontSize: 11, padding: '1px 5px', background: 'none', border: `1px solid ${T.border}`, borderRadius: 3, cursor: 'pointer', color: '#6b7280', lineHeight: 1.4 },
   dropzone:   { border: `2px dashed ${T.border}`, borderRadius: 8, padding: '52px 24px', textAlign: 'center', cursor: 'pointer', background: T.page, userSelect: 'none', transition: 'border-color .2s, background .2s' },

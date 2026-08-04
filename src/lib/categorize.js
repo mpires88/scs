@@ -12,6 +12,25 @@ export function dominantCat(txns) {
     .sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))[0]?.[0] ?? ''
 }
 
+// Category an imported row should be saved with.
+//
+// A row's OWN imported category wins unless the user deliberately set the
+// group's category. Import groups are merchant clusters, so one group routinely
+// holds rows the source filed differently; blanket-applying the group's
+// category silently rewrites the minority. That is not hypothetical — it put
+// 235 historical rows in the wrong account, including rent booked as inventory,
+// which drops off the P&L entirely because inventory is a balance-sheet asset.
+//
+// `groupCat` still fills rows the source left uncategorized, and still wins
+// outright once `groupTouched` is set, since editing a group means "file all of
+// these here".
+export function resolveImportCategory(row, groupCat, groupTouched) {
+  const own = (row.category || '').trim()
+  const group = (groupCat || '').trim()
+  if (groupTouched) return group
+  return own || group
+}
+
 // Status of a group under an effective-category accessor (pending edits
 // included). `mixed` outranks `partial`: conflicting categories are the more
 // urgent signal, and a group can be both — `uncategorized` reports the count
