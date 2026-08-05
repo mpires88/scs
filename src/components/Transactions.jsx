@@ -106,15 +106,17 @@ export default function Transactions({ clientId = null, headerLeft = null }) {
     try {
       // The .order('id') tiebreaker makes .range() pagination stable — without a
       // total order, Postgres may repeat or skip rows across pages.
-      const base = () => supabase
+      const base = opts => supabase
         .from('bank_transactions')
-        .select('id, transaction_date, description, amount, category, account, reference_id')
+        .select('id, transaction_date, description, amount, category, account, reference_id', opts)
         .eq('client_id', clientId)
         .order('transaction_date')
         .order('id')
 
+      // count:'exact' rides along on the first page so the remaining pages are
+      // known up front and can be fetched in parallel, not one after another.
       const [firstRes, coaRes, reviewState, ledgerVal] = await Promise.all([
-        base().range(0, 999),
+        base({ count: 'exact' }).range(0, 999),
         fetchAccounts(clientId),
         getSetting(clientId, REVIEW_STATE_KEY, null).catch(() => null),
         getSetting(clientId, 'ledger_accounts', []).catch(() => []),
@@ -122,6 +124,7 @@ export default function Transactions({ clientId = null, headerLeft = null }) {
       if (firstRes.error) throw firstRes.error
 
       const first = firstRes.data ?? []
+      const total = firstRes.count ?? first.length
       setAccounts(coaRes.accounts)
       setRegistry(Array.isArray(ledgerVal) ? ledgerVal : [])
       const loadedSep = new Set(reviewState?.separated ?? [])
@@ -132,21 +135,22 @@ export default function Transactions({ clientId = null, headerLeft = null }) {
       setTxns(first)     // show data immediately
       setLoading(false)  // spinner off — UI is usable now
 
-      // If we got a full page, quietly fetch the rest
+      // Quietly fetch the rest — all pages at once
       let all = first
-      if (first.length === 1000) {
+      if (total > first.length) {
         setLoadingMore(true)
-        let offset = 1000
-        while (true) {
-          const res = await base().range(offset, offset + 999)
-          // A failed page must surface, not silently truncate — loadingMore is
-          // the gate that keeps Import from deduping against a partial list.
-          if (res.error) throw new Error(`Could not load all transactions (stopped at ${all.length}): ${res.error.message}`)
-          if (!res.data?.length) break
-          all = [...all, ...res.data]
-          if (res.data.length < 1000) break
-          offset += 1000
-        }
+        const ranges = []
+        for (let offset = first.length; offset < total; offset += 1000) ranges.push(offset)
+        const pages = await Promise.all(ranges.map(o => base().range(o, o + 999)))
+        // A failed page must surface, not silently truncate — loadingMore is
+        // the gate that keeps Import from deduping against a partial list.
+        const failed = pages.find(r => r.error)
+        if (failed) throw new Error(`Could not load all transactions: ${failed.error.message}`)
+        // De-duped by id: a row inserted or deleted while pages are in flight
+        // can shift range boundaries and repeat a row across two pages.
+        const byId = new Map(first.map(t => [t.id, t]))
+        pages.forEach(r => (r.data ?? []).forEach(t => { if (!byId.has(t.id)) byId.set(t.id, t) }))
+        all = [...byId.values()]
         // Single commit — one regroup/recluster instead of one per page.
         // Merged by id so a save completed while paging keeps its categories
         // (pages fetched before the save hold pre-save values).
