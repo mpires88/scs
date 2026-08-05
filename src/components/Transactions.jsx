@@ -3,6 +3,7 @@ import { supabase } from '../lib/supabase'
 import { normKey, buildCatIndex, suggestCat, clusterGroups } from '../lib/merchantClustering'
 import { groupStatus, buildDescCatMap } from '../lib/categorize'
 import { ALL_SECTIONS, fetchAccounts } from '../lib/chartOfAccounts'
+import { matchLedgerAccount } from '../lib/balanceSheet'
 import { getSetting, setSetting } from '../lib/settings'
 import { useUnsavedChanges } from '../lib/unsavedChanges'
 import CategoryInput from './CategoryInput'
@@ -63,6 +64,8 @@ export default function Transactions({ clientId = null }) {
   const [view,        setView]        = useState('grouped')  // 'grouped' | 'flat'
   const [dateFrom,    setDateFrom]    = useState('')
   const [dateTo,      setDateTo]      = useState('')
+  const [acctFilter,  setAcctFilter]  = useState('')      // '' = all accounts
+  const [registry,    setRegistry]    = useState([])      // client_settings 'ledger_accounts'
   const [sortGrouped, setSortGrouped] = useState({ col: 'description', dir: 'asc'  })
   const [sortFlat,    setSortFlat]    = useState({ col: 'date',        dir: 'desc' })
   const [expanded,    setExpanded]    = useState({})
@@ -108,15 +111,17 @@ export default function Transactions({ clientId = null }) {
         .order('transaction_date')
         .order('id')
 
-      const [firstRes, coaRes, reviewState] = await Promise.all([
+      const [firstRes, coaRes, reviewState, ledgerVal] = await Promise.all([
         base().range(0, 999),
         fetchAccounts(clientId),
         getSetting(clientId, REVIEW_STATE_KEY, null).catch(() => null),
+        getSetting(clientId, 'ledger_accounts', []).catch(() => []),
       ])
       if (firstRes.error) throw firstRes.error
 
       const first = firstRes.data ?? []
       setAccounts(coaRes.accounts)
+      setRegistry(Array.isArray(ledgerVal) ? ledgerVal : [])
       const loadedSep = new Set(reviewState?.separated ?? [])
       const loadedRej = new Set(reviewState?.rejected ?? [])
       setSeparated(loadedSep)
@@ -187,19 +192,36 @@ export default function Transactions({ clientId = null }) {
 
   const catOf = useCallback(t => effCat(assignments, t), [assignments])
 
-  // Date range narrows the working set before grouping, so group totals and
-  // counts describe the selected window rather than all history. ISO date
-  // strings compare lexicographically, which is also chronological.
+  // A transaction's account as the Chart of Accounts names it. Feed labels come
+  // off the bank/card export and can spell one account several ways; the ledger
+  // registry folds those spellings onto a single name, so this page agrees with
+  // the balance sheet instead of showing an account twice.
+  const acctNameOf = useCallback(
+    t => matchLedgerAccount(registry, t.account)?.label || t.account || 'Unmapped',
+    [registry]
+  )
+
+  // Accounts actually present in the data, by display name.
+  const acctOptions = useMemo(
+    () => [...new Set(txns.map(acctNameOf))].sort((a, b) => a.localeCompare(b)),
+    [txns, acctNameOf]
+  )
+
+  // Date range and account narrow the working set before grouping, so group
+  // totals and counts describe the current selection rather than all history.
+  // ISO date strings compare lexicographically, which is also chronological.
   const dateActive = !!(dateFrom || dateTo)
+  const acctActive = !!acctFilter
   const dateFiltered = useMemo(() => {
-    if (!dateFrom && !dateTo) return txns
+    if (!dateFrom && !dateTo && !acctFilter) return txns
     return txns.filter(t => {
       const d = t.transaction_date || ''
       if (dateFrom && d < dateFrom) return false
       if (dateTo   && d > dateTo)   return false
+      if (acctFilter && acctNameOf(t) !== acctFilter) return false
       return true
     })
-  }, [txns, dateFrom, dateTo])
+  }, [txns, dateFrom, dateTo, acctFilter, acctNameOf])
 
   const groups = useMemo(() => {
     // Suggestion index is built from the full history, not the date window —
@@ -309,13 +331,17 @@ export default function Transactions({ clientId = null }) {
   // Selection is keyed by group key in grouped view and by transaction id in
   // flat view, so it must not survive anything that regroups or switches view;
   // it deliberately does survive page changes.
-  useEffect(() => { setPage(0); setSelected(new Set()) }, [search, filter, fuzzy, view, dateFrom, dateTo])
+  useEffect(() => { setPage(0); setSelected(new Set()) }, [search, filter, fuzzy, view, dateFrom, dateTo, acctFilter])
   useEffect(() => { setPage(0) }, [sortGrouped, sortFlat])
 
   const visibleGroups = useMemo(() => {
     const q = search.toLowerCase()
     return groups.filter(g => {
-      if (q && !g.key.includes(q) && !g.displayDesc.toLowerCase().includes(q)) return false
+      // Category matches on the effective category (pending edits included), and
+      // a group matches if ANY of its rows does — a mixed group would otherwise
+      // vanish when searching for one of the categories inside it.
+      if (q && !g.key.includes(q) && !g.displayDesc.toLowerCase().includes(q)
+        && !g.txns.some(t => catOf(t).toLowerCase().includes(q))) return false
       const st = statusByKey.get(g.key)
       if (filter === 'uncategorized' && st.uncategorized === 0) return false
       if (filter === 'categorized'   && st.uncategorized > 0)   return false
@@ -323,7 +349,7 @@ export default function Transactions({ clientId = null }) {
       if (filter === 'suggestions'   && !hasSugg(g))            return false
       return true
     })
-  }, [groups, search, filter, statusByKey, hasSugg])
+  }, [groups, search, filter, statusByKey, hasSugg, catOf])
 
   const sortedGroups = useMemo(() => {
     const { col, dir } = sortGrouped
@@ -353,8 +379,10 @@ export default function Transactions({ clientId = null }) {
   const visibleTxns = useMemo(() => {
     const q = search.toLowerCase()
     return dateFiltered.filter(t => {
-      if (q && !(t.description || '').toLowerCase().includes(q)) return false
-      const c = catOf(t)
+      const cat = catOf(t)
+      if (q && !(t.description || '').toLowerCase().includes(q)
+        && !cat.toLowerCase().includes(q)) return false
+      const c = cat
       const meta = txnMeta.get(t.id)
       if (filter === 'uncategorized' && c)  return false
       if (filter === 'categorized'   && !c) return false
@@ -424,11 +452,13 @@ export default function Transactions({ clientId = null }) {
 
   // ── Upload coverage ────────────────────────────────────────────────────────
 
+  // Rows are keyed by the Chart of Accounts name, so several feed spellings of
+  // one account collapse into a single row instead of implying a gap in each.
   const coverage = useMemo(() => {
     if (!txns.length) return null
     const map = {}
     txns.forEach(t => {
-      const acct = t.account || 'Unknown'
+      const acct = acctNameOf(t)
       const ym   = (t.transaction_date || '').slice(0, 7)
       if (!ym) return
       if (!map[acct]) map[acct] = {}
@@ -436,7 +466,7 @@ export default function Transactions({ clientId = null }) {
     })
     const months = [...new Set(txns.map(t => (t.transaction_date || '').slice(0, 7)).filter(Boolean))].sort()
     return { accounts: Object.keys(map).sort(), months, map }
-  }, [txns])
+  }, [txns, acctNameOf])
 
   // ── Delete ─────────────────────────────────────────────────────────────────
 
@@ -612,7 +642,11 @@ export default function Transactions({ clientId = null }) {
           <p style={s.sub}>
             {!isFlat && <>{groups.length} merchant groups · </>}
             {dateFiltered.length} transaction{dateFiltered.length !== 1 ? 's' : ''}
-            {dateActive && <> <span style={{ color: T.navy, fontWeight: 500 }}>in range</span> of {txns.length}</>}
+            {(dateActive || acctActive) && (
+              <> <span style={{ color: T.navy, fontWeight: 500 }}>
+                {[acctActive && acctFilter, dateActive && 'in range'].filter(Boolean).join(' · ')}
+              </span> of {txns.length}</>
+            )}
             {loadingMore && <> · <span style={{ color: T.charcoal, opacity: .6 }}>loading more…</span></>}
             {uncatTxnCount > 0 && <> · <span style={{ color: T.amber, fontWeight: 500 }}>{uncatTxnCount} transaction{uncatTxnCount !== 1 ? 's' : ''} uncategorized</span></>}
             {suggCount  > 0 && <> · <span style={{ color: T.gold, fontWeight: 500 }}>{suggCount} suggestions</span></>}
@@ -649,7 +683,7 @@ export default function Transactions({ clientId = null }) {
       {/* Toolbar */}
       <div style={s.toolbar}>
         <div style={s.tabs}>
-          {[['grouped', 'Grouped'], ['flat', 'All transactions']].map(([val, label]) => (
+          {[['flat', 'All transactions'], ['grouped', 'Grouped']].map(([val, label]) => (
             <button key={val}
               style={{ ...s.tab, ...(view === val ? s.tabActive : {}) }}
               onClick={() => setView(val)}
@@ -659,12 +693,24 @@ export default function Transactions({ clientId = null }) {
             >{label}</button>
           ))}
         </div>
-        <input
-          style={{ ...s.input, width: 240 }}
-          placeholder="Search descriptions…"
-          value={search}
-          onChange={e => setSearch(e.target.value)}
-        />
+        <div style={{ position: 'relative', display: 'inline-flex', alignItems: 'center' }}>
+          <input
+            style={{ ...s.input, width: 240, paddingRight: search ? 26 : undefined }}
+            placeholder="Search descriptions & categories…"
+            value={search}
+            onChange={e => setSearch(e.target.value)}
+            onKeyDown={e => { if (e.key === 'Escape') { setSearch(''); e.currentTarget.blur() } }}
+          />
+          {search && (
+            <button
+              type="button"
+              title="Clear search (Esc)"
+              aria-label="Clear search"
+              onClick={() => setSearch('')}
+              style={s.searchClear}
+            >×</button>
+          )}
+        </div>
         <div style={s.tabs}>
           {[
             ['all',           'All'],
@@ -679,6 +725,20 @@ export default function Transactions({ clientId = null }) {
             >{label}</button>
           ))}
         </div>
+        {acctOptions.length > 1 && (
+          <div style={s.dateRange}>
+            <span style={s.dateLabel}>Account</span>
+            <select
+              style={{ ...s.input, maxWidth: 220 }}
+              value={acctFilter}
+              onChange={e => setAcctFilter(e.target.value)}
+              title="Names come from the bank and credit-card accounts on Chart of Accounts"
+            >
+              <option value="">All accounts</option>
+              {acctOptions.map(a => <option key={a} value={a}>{a}</option>)}
+            </select>
+          </div>
+        )}
         <div style={s.dateRange}>
           <span style={s.dateLabel}>Date</span>
           <input
@@ -1091,6 +1151,7 @@ const s = {
   content:     { padding: '20px 28px' },
   toolbar:     { display: 'flex', gap: 8, alignItems: 'center', marginBottom: 14, flexWrap: 'wrap' },
   input:       { padding: '5px 9px', border: `1px solid ${T.border}`, borderRadius: 5, fontSize: 11, color: T.charcoal, background: '#fff', outline: 'none' },
+  searchClear: { position: 'absolute', right: 6, background: 'none', border: 'none', cursor: 'pointer', color: '#9ca3af', fontSize: 15, lineHeight: 1, padding: '0 3px' },
   tabs:        { display: 'flex', gap: 2 },
   tab:         { padding: '5px 12px', border: `1px solid ${T.border}`, borderRadius: 5, background: '#fff', fontSize: 11, color: T.charcoal, cursor: 'pointer', fontWeight: 400 },
   tabActive:   { background: T.navy, color: '#fff', border: `1px solid ${T.navy}`, fontWeight: 500 },
