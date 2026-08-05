@@ -10,6 +10,7 @@ import { fetchAccounts } from '../lib/chartOfAccounts'
 import { getSetting } from '../lib/settings'
 import { buildCashFlow, cashFlowYears } from '../lib/cashFlow'
 import { T, MON, fmtYm, STMT } from '../lib/theme'
+import InfoTip from './InfoTip'
 
 const fmtCell = n => {
   if (n == null || n === 0) return '—'
