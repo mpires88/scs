@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback, useRef } from 'react'
+import { useState, useEffect, useCallback, useRef, Fragment } from 'react'
 import { supabase } from '../lib/supabase'
 import { T, fmt2 as fmt, fmtPeriod } from '../lib/theme'
 
@@ -88,10 +88,132 @@ function parseSquareEml(text) {
   }
 }
 
+// ─── Saved-report detail ──────────────────────────────────────────────────────
+// Everything the parser pulled but the summary row has no space for: the full
+// sales waterfall (returns and discounts are stored yet never shown), the
+// payment split, and every category rather than just the largest.
+
+function ReportDetail({ r, cats }) {
+  const num = v => (v == null ? null : Number(v))
+  // The sales side ends at Total — net sales plus tax, i.e. what customers were
+  // charged. Square's fees are not a sales number; they live on the payment
+  // side below, where they reduce what was actually received.
+  const netSales = num(r.net_sales), tax = num(r.tax_collected)
+  const waterfall = [
+    { label: 'Gross Sales',        value: num(r.gross_sales) },
+    { label: 'Returns',            value: num(r.returns) },
+    { label: 'Discounts & Comps',  value: num(r.discounts) },
+    { label: 'Net Sales',          value: netSales,  rule: true },
+    { label: 'Tax collected',      value: tax, color: '#D97706' },
+    { label: 'Total',              value: netSales == null ? null : netSales + (tax ?? 0), rule: true },
+  ]
+  const cash = num(r.cash_amount), card = num(r.card_amount)
+  const fees = num(r.fees)
+  const paid = (cash ?? 0) + (card ?? 0)
+  const catTotal   = cats.reduce((s, c) => s + (Number(c.amount) || 0), 0)
+  const itemsTotal = cats.reduce((s, c) => s + (Number(c.count)  || 0), 0)
+  const sorted = [...cats].sort((a, b) => (Number(b.amount) || 0) - (Number(a.amount) || 0))
+
+  const lbl = { fontSize: 9.5, fontWeight: 700, color: T.gold, textTransform: 'uppercase', letterSpacing: '.06em', marginBottom: 7 }
+  const th  = right => ({ textAlign: right ? 'right' : 'left', padding: '4px 8px', background: T.page, fontSize: 9, fontWeight: 700, color: T.gold, textTransform: 'uppercase', letterSpacing: '.06em', whiteSpace: 'nowrap' })
+  const td  = { padding: '4px 8px', fontSize: 11.5, color: T.charcoal, fontVariantNumeric: 'tabular-nums' }
+
+  return (
+    <div style={{ display: 'flex', gap: 26, flexWrap: 'wrap', padding: '14px 16px 16px 34px', alignItems: 'flex-start' }}>
+
+      <div style={{ flex: '1 1 250px', minWidth: 230 }}>
+        <div style={lbl}>Sales Breakdown</div>
+        <table style={{ width: '100%', borderCollapse: 'collapse' }}>
+          <tbody>
+            {waterfall.map(w => (
+              <tr key={w.label} style={w.rule ? { borderTop: `1px solid ${T.border}` } : undefined}>
+                <td style={{ ...td, color: w.rule ? T.navy : T.charcoal, fontWeight: w.rule ? 600 : 400 }}>{w.label}</td>
+                <td style={{ ...td, textAlign: 'right', color: w.color ?? (w.rule ? T.navy : T.charcoal), fontWeight: w.rule ? 700 : 400 }}>
+                  {w.value == null ? '—' : fmt(w.value)}
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+        {(r.returns == null && r.discounts == null) && (
+          <p style={{ fontSize: 10, color: '#9ca3af', margin: '7px 0 0', lineHeight: 1.5 }}>
+            Returns and discounts weren’t captured for this month — re-upload the .eml to fill them in.
+          </p>
+        )}
+
+        <div style={{ ...lbl, marginTop: 16 }}>Payment Methods</div>
+        <table style={{ width: '100%', borderCollapse: 'collapse' }}>
+          <tbody>
+            <tr><td style={td}>Cash</td><td style={{ ...td, textAlign: 'right' }}>{cash == null ? '—' : fmt(cash)}</td></tr>
+            <tr><td style={td}>Card</td><td style={{ ...td, textAlign: 'right' }}>{card == null ? '—' : fmt(card)}</td></tr>
+            {(cash != null || card != null) && (
+              <tr style={{ borderTop: `1px solid ${T.border}` }}>
+                <td style={{ ...td, color: T.navy, fontWeight: 600 }}>Collected</td>
+                <td style={{ ...td, textAlign: 'right', color: T.navy, fontWeight: 700 }}>{fmt(paid)}</td>
+              </tr>
+            )}
+            {fees != null && (
+              <tr>
+                <td style={td}>Square fees</td>
+                <td style={{ ...td, textAlign: 'right', color: T.danger }}>{fmt(-fees)}</td>
+              </tr>
+            )}
+            {fees != null && (cash != null || card != null) && (
+              <tr style={{ borderTop: `1px solid ${T.border}` }}>
+                <td style={{ ...td, color: T.navy, fontWeight: 600 }}>Net payout</td>
+                <td style={{ ...td, textAlign: 'right', color: T.success, fontWeight: 700 }}>{fmt(paid - fees)}</td>
+              </tr>
+            )}
+          </tbody>
+        </table>
+      </div>
+
+      <div style={{ flex: '2 1 340px', minWidth: 300 }}>
+        <div style={lbl}>Category Sales{cats.length ? ` · ${cats.length}` : ''}</div>
+        {cats.length === 0 ? (
+          <p style={{ fontSize: 11.5, color: '#9ca3af', margin: 0 }}>
+            No category breakdown was found in this report.
+          </p>
+        ) : (
+          <table style={{ width: '100%', borderCollapse: 'collapse' }}>
+            <thead>
+              <tr>
+                <th style={th(false)}>Category</th>
+                <th style={th(true)}>Items</th>
+                <th style={th(true)}>Revenue</th>
+                <th style={th(true)}>Share</th>
+              </tr>
+            </thead>
+            <tbody>
+              {sorted.map((c, i) => (
+                <tr key={i} style={{ borderBottom: `1px solid ${T.border}` }}>
+                  <td style={{ ...td, fontVariantNumeric: 'normal' }}>{c.name}</td>
+                  <td style={{ ...td, textAlign: 'right' }}>{(Number(c.count) || 0).toLocaleString()}</td>
+                  <td style={{ ...td, textAlign: 'right' }}>{fmt(c.amount)}</td>
+                  <td style={{ ...td, textAlign: 'right', color: '#9ca3af' }}>
+                    {catTotal ? `${((Number(c.amount) || 0) / catTotal * 100).toFixed(1)}%` : '—'}
+                  </td>
+                </tr>
+              ))}
+              <tr style={{ background: T.page }}>
+                <td style={{ ...td, color: T.navy, fontWeight: 600, fontVariantNumeric: 'normal' }}>Total</td>
+                <td style={{ ...td, textAlign: 'right', color: T.navy, fontWeight: 600 }}>{itemsTotal.toLocaleString()}</td>
+                <td style={{ ...td, textAlign: 'right', color: T.navy, fontWeight: 700 }}>{fmt(catTotal)}</td>
+                <td style={{ ...td, textAlign: 'right', color: '#9ca3af' }}>100%</td>
+              </tr>
+            </tbody>
+          </table>
+        )}
+      </div>
+    </div>
+  )
+}
+
 // ─── Component ────────────────────────────────────────────────────────────────
 
 export default function SquareReports({ clientId }) {
   const [reports,  setReports]  = useState([])
+  const [expanded, setExpanded] = useState({})   // report id → open
   const [loading,  setLoading]  = useState(true)
   const [dragOver, setDragOver] = useState(false)
   const [preview,  setPreview]  = useState(null)
@@ -289,8 +411,8 @@ export default function SquareReports({ clientId }) {
           <table style={{ width: '100%', borderCollapse: 'collapse' }}>
             <thead>
               <tr>
-                {['Month', 'Gross Sales', 'Tax', 'Fees', 'Net Payout', 'Top Category', ''].map((h, i) => (
-                  <th key={i} style={{ textAlign: i === 0 ? 'left' : i === 6 ? 'center' : 'right', padding: '7px 10px', background: T.page, fontSize: 9.5, fontWeight: 700, color: T.gold, textTransform: 'uppercase', letterSpacing: '.06em', borderBottom: `2px solid ${T.border}`, whiteSpace: 'nowrap' }}>{h}</th>
+                {['', 'Month', 'Gross Sales', 'Tax', 'Fees', 'Net Payout', 'Top Category', ''].map((h, i) => (
+                  <th key={i} style={{ textAlign: i === 1 ? 'left' : i === 0 || i === 7 ? 'center' : 'right', padding: '7px 10px', background: T.page, fontSize: 9.5, fontWeight: 700, color: T.gold, textTransform: 'uppercase', letterSpacing: '.06em', borderBottom: `2px solid ${T.border}`, whiteSpace: 'nowrap' }}>{h}</th>
                 ))}
               </tr>
             </thead>
@@ -298,22 +420,41 @@ export default function SquareReports({ clientId }) {
               {reports.map((r, i) => {
                 const cats = Array.isArray(r.categories) ? r.categories : []
                 const top = [...cats].sort((a, b) => b.amount - a.amount)[0]
+                const isOpen = !!expanded[r.id]
+                const zebra = i % 2 === 0 ? '#fff' : '#f9fafb'
+                const toggle = () => setExpanded(p => ({ ...p, [r.id]: !p[r.id] }))
                 return (
-                  <tr key={r.id} style={{ background: i % 2 === 0 ? '#fff' : '#f9fafb', borderBottom: `1px solid ${T.border}` }}>
-                    <td style={{ padding: '8px 10px', fontSize: 13, fontWeight: 500, color: T.navy }}>{fmtPeriod(r.period)}</td>
-                    <td style={{ padding: '8px 10px', fontSize: 12, textAlign: 'right', fontVariantNumeric: 'tabular-nums', color: T.charcoal }}>{fmt(r.gross_sales)}</td>
-                    <td style={{ padding: '8px 10px', fontSize: 12, textAlign: 'right', fontVariantNumeric: 'tabular-nums', color: '#D97706' }}>{fmt(r.tax_collected)}</td>
-                    <td style={{ padding: '8px 10px', fontSize: 12, textAlign: 'right', fontVariantNumeric: 'tabular-nums', color: T.danger }}>{fmt(r.fees)}</td>
-                    <td style={{ padding: '8px 10px', fontSize: 12, textAlign: 'right', fontVariantNumeric: 'tabular-nums', color: T.success }}>{fmt(r.net_total)}</td>
-                    <td style={{ padding: '8px 10px', fontSize: 12, textAlign: 'right', color: T.charcoal }}>
-                      {top ? `${top.name} (${fmt(top.amount)})` : '—'}
-                    </td>
-                    <td style={{ padding: '8px 10px', textAlign: 'center' }}>
-                      <button onClick={() => deleteReport(r.id)}
-                        style={{ background: 'none', border: 'none', color: '#9ca3af', cursor: 'pointer', fontSize: 13, padding: '2px 6px' }}
-                        title="Delete">✕</button>
-                    </td>
-                  </tr>
+                  <Fragment key={r.id}>
+                    <tr style={{ background: zebra, borderBottom: `1px solid ${T.border}` }}>
+                      <td style={{ padding: '8px 4px', textAlign: 'center', width: 28 }}>
+                        <button onClick={toggle} title={isOpen ? 'Hide details' : 'Show everything pulled from this report'}
+                          aria-expanded={isOpen}
+                          style={{ background: 'none', border: 'none', cursor: 'pointer', color: '#9ca3af', fontSize: 10, padding: '2px 4px', lineHeight: 1 }}>
+                          {isOpen ? '▲' : '▼'}
+                        </button>
+                      </td>
+                      <td onClick={toggle} style={{ padding: '8px 10px', fontSize: 13, fontWeight: 500, color: T.navy, cursor: 'pointer' }}>{fmtPeriod(r.period)}</td>
+                      <td style={{ padding: '8px 10px', fontSize: 12, textAlign: 'right', fontVariantNumeric: 'tabular-nums', color: T.charcoal }}>{fmt(r.gross_sales)}</td>
+                      <td style={{ padding: '8px 10px', fontSize: 12, textAlign: 'right', fontVariantNumeric: 'tabular-nums', color: '#D97706' }}>{fmt(r.tax_collected)}</td>
+                      <td style={{ padding: '8px 10px', fontSize: 12, textAlign: 'right', fontVariantNumeric: 'tabular-nums', color: T.danger }}>{fmt(r.fees)}</td>
+                      <td style={{ padding: '8px 10px', fontSize: 12, textAlign: 'right', fontVariantNumeric: 'tabular-nums', color: T.success }}>{fmt(r.net_total)}</td>
+                      <td style={{ padding: '8px 10px', fontSize: 12, textAlign: 'right', color: T.charcoal }}>
+                        {top ? `${top.name} (${fmt(top.amount)})` : '—'}
+                      </td>
+                      <td style={{ padding: '8px 10px', textAlign: 'center' }}>
+                        <button onClick={() => deleteReport(r.id)}
+                          style={{ background: 'none', border: 'none', color: '#9ca3af', cursor: 'pointer', fontSize: 13, padding: '2px 6px' }}
+                          title="Delete">✕</button>
+                      </td>
+                    </tr>
+                    {isOpen && (
+                      <tr>
+                        <td colSpan={8} style={{ padding: 0, background: '#F7FAFC', borderBottom: `2px solid ${T.border}` }}>
+                          <ReportDetail r={r} cats={cats} />
+                        </td>
+                      </tr>
+                    )}
+                  </Fragment>
                 )
               })}
             </tbody>
