@@ -1,8 +1,7 @@
-import { useState, useEffect, useMemo, useCallback, Fragment } from 'react'
+import { useState, useEffect, useMemo, Fragment } from 'react'
 import { supabase, fetchAll } from '../lib/supabase'
 import { PL_SECTIONS, fetchAccounts } from '../lib/chartOfAccounts'
 import { groupRowsByParent } from '../lib/plGrouping'
-import { getSetting, setSetting } from '../lib/settings'
 import { T, MON, fmtYm, STMT } from '../lib/theme'
 
 // Expense-like sections are displayed as positive "money spent" numbers.
@@ -25,7 +24,6 @@ const fmtCell = n => {
 export default function ReportsPL({ clientId, headerLeft = null, shared = null, data = null, csvSink = null }) {
   const [txnsLocal,     setTxns]     = useState([])
   const [accountsLocal, setAccounts] = useState([])
-  const [budgets,       setBudgets]  = useState({})     // account → monthly budget
   const [loadingLocal,  setLoading]  = useState(true)
   const [error,      setError]      = useState(null)
   // Injected data is read straight through rather than copied into state —
@@ -37,38 +35,28 @@ export default function ReportsPL({ clientId, headerLeft = null, shared = null, 
   const accounts = data ? data.accounts : accountsLocal
   const loading  = data ? false         : loadingLocal
   const [yearLocal,     setYear]       = useState(null)
-  const [showBudget,    setShowBudget] = useState(false)
-  const [showAll,       setShowAll]    = useState(true)
   const [hideZeroLocal, setHideZero]   = useState(false)
   const [periodLocal,   setPeriod]     = useState('monthly')  // 'monthly' | 'yearly'
   const year     = shared ? shared.year     : yearLocal
   const hideZero = shared ? shared.hideZero : hideZeroLocal
   const period   = shared ? shared.period   : periodLocal
-  const [drafts,     setDrafts]     = useState({})
 
   useEffect(() => {
+    if (data) return   // the combined page supplied the ledger
     let cancelled = false
     ;(async () => {
-      // Budgets are a small settings read, needed on both paths.
-      if (data) {
-        const v = await getSetting(clientId, 'budgets', {}).catch(() => ({}))
-        if (!cancelled) setBudgets(v || {})
-        return
-      }
       setLoading(true); setError(null)
       try {
-        const [rows, coa, budgetVal] = await Promise.all([
+        const [rows, coa] = await Promise.all([
           fetchAll(() => supabase.from('bank_transactions')
             .select('transaction_date, amount, category')
             .eq('client_id', clientId).not('category', 'is', null).neq('category', '')
             .order('transaction_date').order('id')),
           fetchAccounts(clientId),
-          getSetting(clientId, 'budgets', {}).catch(() => ({})),
         ])
         if (cancelled) return
         setTxns(rows)
         setAccounts(coa.accounts)
-        setBudgets(budgetVal || {})
         const yrs = [...new Set(rows.map(t => +(t.transaction_date || '').slice(0, 4)).filter(Boolean))].sort()
         setYear(yrs[yrs.length - 1] ?? null)
       } catch (e) {
@@ -127,11 +115,13 @@ export default function ReportsPL({ clientId, headerLeft = null, shared = null, 
       }
       return out
     }
-    const months = yearly
+    // The combined page dictates one column set for all three statements so a
+    // month lands in the same place on each; standalone, derive our own.
+    const months = shared?.columns?.length ? [...shared.columns] : (yearly
       ? active
       : allDates
         ? ymRange(active[0], active[active.length - 1])
-        : Array.from({ length: active[active.length - 1] }, (_, i) => i + 1)
+        : Array.from({ length: active[active.length - 1] }, (_, i) => i + 1))
 
     // account → { [column]: sum }
     const acctMonth = {}
@@ -159,14 +149,15 @@ export default function ReportsPL({ clientId, headerLeft = null, shared = null, 
     const sections = PL_SECTIONS.map(section => {
       const names = Object.keys(acctMonth)
         .filter(name => (sectionMap[name] ?? 'Operating Expenses') === section)
-      if (showAll) {
-        accounts.forEach(a => {
-          if (a.pl_section !== section) return
-          if (acctMonth[a.name]) return          // already present with activity
-          if (hasChildren.has(a.name)) return    // covered by its group label
-          names.push(a.name)
-        })
-      }
+      // Every chart account is listed even with no activity — otherwise a whole
+      // section can vanish while its computed line still prints. "Hide $0 rows"
+      // is the one control for a compact statement.
+      accounts.forEach(a => {
+        if (a.pl_section !== section) return
+        if (acctMonth[a.name]) return          // already present with activity
+        if (hasChildren.has(a.name)) return    // covered by its group label
+        names.push(a.name)
+      })
       const rows = [...new Set(names)]
         .sort(alnum)
         .map(name => {
@@ -218,21 +209,8 @@ export default function ReportsPL({ clientId, headerLeft = null, shared = null, 
       months.forEach(m => { computed[key].byMonth[m] = combine(secs, m) })
     })
 
-    // Budget variance divides by the columns that actually traded, not the
-    // padded ones — averaging a closed month in would understate every account.
     return { year, months, activeCount: active.length, sections, computed, yearly, allDates }
-  }, [txns, sectionMap, accounts, year, showAll, hideZero, period])
-
-  // ── Budget helpers ─────────────────────────────────────────────────────────
-
-  const saveBudget = useCallback(async (name, val) => {
-    const next = { ...budgets }
-    const n = parseFloat(String(val).replace(/[$,\s]/g, ''))
-    if (val === '' || isNaN(n)) delete next[name]
-    else next[name] = n
-    setBudgets(next)
-    try { await setSetting(clientId, 'budgets', next) } catch (e) { alert('Could not save budget: ' + e.message) }
-  }, [clientId, budgets])
+  }, [txns, sectionMap, accounts, year, hideZero, period, shared?.columns])
 
   // ── Export ─────────────────────────────────────────────────────────────────
 
@@ -292,10 +270,6 @@ export default function ReportsPL({ clientId, headerLeft = null, shared = null, 
 
   // ── Render ─────────────────────────────────────────────────────────────────
 
-  // Budgets are monthly targets, so the variance column is meaningless against
-  // year-wide columns — the budget view is suppressed rather than shown wrong.
-  const budgetOn = showBudget && !statement?.yearly
-
   if (loading) return (
     <div style={{ display:'flex', alignItems:'center', justifyContent:'center', minHeight:300, background:T.page }}>
       <style>{`@keyframes spin { to { transform: rotate(360deg) } }`}</style>
@@ -330,13 +304,6 @@ export default function ReportsPL({ clientId, headerLeft = null, shared = null, 
           </div>
         )}
         <div className="pl-controls" style={{ display:'flex', gap:8, alignItems:'center', flexWrap:'wrap' }}>
-          <label
-            style={{ display:'flex', alignItems:'center', gap:6, fontSize:11, color:T.charcoal, cursor:'pointer', userSelect:'none' }}
-            title="Show every account in your chart of accounts, including ones with no activity this year. Turn off for a compact statement to print or send."
-          >
-            <input type="checkbox" checked={showAll} onChange={e => setShowAll(e.target.checked)} />
-            All accounts
-          </label>
           {!shared && (<>
           <label
             style={{ display:'flex', alignItems:'center', gap:6, fontSize:11, color:T.charcoal, cursor:'pointer', userSelect:'none' }}
@@ -345,18 +312,6 @@ export default function ReportsPL({ clientId, headerLeft = null, shared = null, 
             <input type="checkbox" checked={hideZero} onChange={e => setHideZero(e.target.checked)} />
             Hide $0 rows
           </label>
-          </>)}
-          <label
-            style={{ display:'flex', alignItems:'center', gap:6, fontSize:11, color: statement?.yearly ? '#b6b2a8' : T.charcoal, cursor: statement?.yearly ? 'not-allowed' : 'pointer', userSelect:'none' }}
-            title={statement?.yearly
-              ? 'Budgets are monthly targets, so the comparison is off in the yearly view.'
-              : undefined}
-          >
-            <input type="checkbox" checked={budgetOn} disabled={!!statement?.yearly}
-              onChange={e => setShowBudget(e.target.checked)} />
-            Budget vs. actual
-          </label>
-          {!shared && (<>
           <select
             style={{ fontSize:11, padding:'4px 8px', border:`1px solid ${T.border}`, borderRadius:5, color:T.charcoal, background:'#fff', outline:'none' }}
             value={period} onChange={e => setPeriod(e.target.value)}
@@ -365,9 +320,9 @@ export default function ReportsPL({ clientId, headerLeft = null, shared = null, 
             <option value="monthly">Monthly</option>
             <option value="yearly">Yearly — all years</option>
           </select>
-          </>)}
           <button style={btn.sec} onClick={exportCSV} disabled={!statement}>↓ Export CSV</button>
-          {!shared && <button style={btn.sec} onClick={() => window.print()} disabled={!statement}>🖨 Print / PDF</button>}
+          <button style={btn.sec} onClick={() => window.print()} disabled={!statement}>🖨 Print / PDF</button>
+          </>)}
         </div>
       </header>
 
@@ -397,8 +352,8 @@ export default function ReportsPL({ clientId, headerLeft = null, shared = null, 
             No categorized transactions yet — import and categorize bank activity to build the P&amp;L.
           </p>
         ) : (
-          <div style={{ display:'inline-block', verticalAlign:'top', maxWidth:'100%', overflowX:'auto', background:T.card, border:`1px solid ${T.border}`, borderRadius:7 }}>
-            <table style={{ borderCollapse:'collapse', width:'auto', fontSize:11.5 }}>
+          <div className="stmt-scroll" style={{ display:'inline-block', verticalAlign:'top', maxWidth:'100%', overflowX:'auto', background:T.card, border:`1px solid ${T.border}`, borderRadius:7 }}>
+            <table style={{ borderCollapse:'collapse', width:'auto', tableLayout:'fixed', fontSize:11.5 }}>
               <thead>
                 <tr>
                   <th style={{ ...cell.th, textAlign:'left', width:STMT.label, minWidth:STMT.label, maxWidth:STMT.label, position:'sticky', left:0, background:T.page, zIndex:1 }}>Account</th>
@@ -408,10 +363,6 @@ export default function ReportsPL({ clientId, headerLeft = null, shared = null, 
                     </th>
                   ))}
                   <th style={{ ...cell.th, textAlign:'right', width:STMT.total, minWidth:STMT.total, borderLeft:`2px solid ${T.border}` }}>Total</th>
-                  {budgetOn && <>
-                    <th style={{ ...cell.th, textAlign:'right', minWidth:64, borderLeft:`2px solid ${T.border}` }}>Budget/mo</th>
-                    <th style={{ ...cell.th, textAlign:'right', minWidth:72 }}>Avg vs Budget</th>
-                  </>}
                 </tr>
               </thead>
               <tbody>
@@ -426,14 +377,10 @@ export default function ReportsPL({ clientId, headerLeft = null, shared = null, 
                   return (
                     <Fragment key={sec.section}>
                       {sec.entries.length > 0 && (
-                        <SectionRows
-                          sec={sec} sign={sign} months={statement.months} monthCount={statement.activeCount}
-                          showBudget={budgetOn} budgets={budgets} drafts={drafts} setDrafts={setDrafts} saveBudget={saveBudget}
-                          isExpense={isExpense}
-                        />
+                        <SectionRows sec={sec} sign={sign} months={statement.months} />
                       )}
                       {computedAfter && (
-                        <ComputedRow label={computedAfter[0]} data={computedAfter[1]} months={statement.months} showBudget={budgetOn} />
+                        <ComputedRow label={computedAfter[0]} data={computedAfter[1]} months={statement.months} />
                       )}
                     </Fragment>
                   )
@@ -448,7 +395,6 @@ export default function ReportsPL({ clientId, headerLeft = null, shared = null, 
                   <td style={{ ...cell.num, borderLeft:`2px solid rgba(255,255,255,0.2)`, color: statement.computed.netIncome.total < 0 ? '#FCA5A5' : '#A7F3D0', fontWeight:700 }}>
                     {fmtCell(statement.computed.netIncome.total)}
                   </td>
-                  {budgetOn && <><td style={cell.num}></td><td style={cell.num}></td></>}
                 </tr>
               </tbody>
             </table>
@@ -459,11 +405,8 @@ export default function ReportsPL({ clientId, headerLeft = null, shared = null, 
           <p style={{ fontSize:10.5, color:'rgba(74,74,74,0.55)', marginTop:10, lineHeight:1.6 }}>
             Amounts in parentheses are negative. A dash means no activity. Expense sections show money
             spent as positive numbers; computed lines (Net Revenue, Gross Profit, Operating Income,
-            Net Income) are signed.
-            {showAll
-              ? ' Every account in your chart of accounts is listed — untick “All accounts” for a compact statement.'
-              : ' Only accounts with activity this year are listed — tick “All accounts” to see the full chart.'}
-            {budgetOn && ' Budgets are monthly targets — variance compares this year’s monthly average against them.'}
+            Net Income) are signed. Every account in your chart of accounts is listed — use
+            “Hide $0 rows” for a compact statement.
           </p>
         )}
       </div>
@@ -472,7 +415,7 @@ export default function ReportsPL({ clientId, headerLeft = null, shared = null, 
 }
 
 // One P&L section: header, account rows, subtotal.
-function SectionRows({ sec, sign, months, monthCount, showBudget, budgets, drafts, setDrafts, saveBudget, isExpense }) {
+function SectionRows({ sec, sign, months }) {
   return (
     <>
       <tr>
@@ -481,7 +424,7 @@ function SectionRows({ sec, sign, months, monthCount, showBudget, budgets, draft
         </td>
       </tr>
       {sec.entries.map(en => {
-        const rowProps = { sign, months, monthCount, showBudget, budgets, drafts, setDrafts, saveBudget, isExpense }
+        const rowProps = { sign, months }
         if (en.kind === 'row') return <AccountRow key={en.name} r={en} {...rowProps} />
         return (
           <Fragment key={en.name}>
@@ -490,7 +433,6 @@ function SectionRows({ sec, sign, months, monthCount, showBudget, budgets, draft
               <td style={{ ...cell.td, paddingLeft:16, fontWeight:600, position:'sticky', left:0, background:T.card }}>{en.name}</td>
               {months.map(m => <td key={m} style={cell.num}></td>)}
               <td style={{ ...cell.num, borderLeft:`2px solid ${T.border}` }}></td>
-              {showBudget && <><td style={{ ...cell.num, borderLeft:`2px solid ${T.border}` }}></td><td style={cell.num}></td></>}
             </tr>
             {en.children.map(r => <AccountRow key={r.name} r={r} indent {...rowProps} />)}
             {en.own && <AccountRow key={`${en.name} (other)`} r={en.own} label={`${en.name} (other)`} indent {...rowProps} />}
@@ -500,7 +442,6 @@ function SectionRows({ sec, sign, months, monthCount, showBudget, budgets, draft
                 <td key={m} style={{ ...cell.num, fontWeight:600 }}>{fmtCell((en.totals[m] ?? 0) * sign)}</td>
               ))}
               <td style={{ ...cell.num, borderLeft:`2px solid ${T.border}`, fontWeight:700 }}>{fmtCell(en.total * sign)}</td>
-              {showBudget && <><td style={{ ...cell.num, borderLeft:`2px solid ${T.border}` }}></td><td style={cell.num}></td></>}
             </tr>
           </Fragment>
         )
@@ -512,22 +453,13 @@ function SectionRows({ sec, sign, months, monthCount, showBudget, budgets, draft
           <td key={m} style={{ ...cell.num, fontWeight:600, color:T.navy }}>{fmtCell(sec.totals[m] * sign)}</td>
         ))}
         <td style={{ ...cell.num, borderLeft:`2px solid ${T.border}`, fontWeight:700, color:T.navy }}>{fmtCell(sec.total * sign)}</td>
-        {showBudget && <><td style={cell.num}></td><td style={cell.num}></td></>}
       </tr>
     </>
   )
 }
 
-// One account line. `indent` marks a sub-account row nested under a parent;
-// budgets stay keyed by the real account name even when the label is
-// overridden (the parent's "(other)" row).
-function AccountRow({ r, label, indent = false, sign, months, monthCount, showBudget, budgets, drafts, setDrafts, saveBudget, isExpense }) {
-  const avg = (r.total * sign) / monthCount
-  const budget = budgets[r.name]
-  const variance = budget != null ? avg - budget : null
-  // For expenses, over budget is bad; for revenue, under budget is bad
-  const bad = variance != null && (isExpense ? variance > 0 : variance < 0)
-  const draft = drafts[r.name]
+// One account line. `indent` marks a sub-account row nested under a parent.
+function AccountRow({ r, label, indent = false, sign, months }) {
   return (
     <tr style={{ borderBottom:`1px solid #F0EEE9` }}>
       <td title={label ?? r.name} style={{ ...cell.td, paddingLeft: indent ? 26 : 16, position:'sticky', left:0, background:T.card }}>{label ?? r.name}</td>
@@ -535,32 +467,13 @@ function AccountRow({ r, label, indent = false, sign, months, monthCount, showBu
         <td key={m} style={cell.num}>{fmtCell((r.byMonth[m] ?? 0) * sign)}</td>
       ))}
       <td style={{ ...cell.num, borderLeft:`2px solid ${T.border}`, fontWeight:600 }}>{fmtCell(r.total * sign)}</td>
-      {showBudget && <>
-        <td style={{ ...cell.num, borderLeft:`2px solid ${T.border}` }}>
-          <input
-            style={{ width:56, padding:'1px 4px', border:`1px solid ${T.border}`, borderRadius:4, fontSize:10.5, textAlign:'right', outline:'none', background:'#fff' }}
-            value={draft ?? (budget ?? '')}
-            placeholder="—"
-            onChange={e => setDrafts(p => ({ ...p, [r.name]: e.target.value }))}
-            onBlur={() => {
-              if (draft === undefined) return
-              saveBudget(r.name, draft)
-              setDrafts(p => { const c = { ...p }; delete c[r.name]; return c })
-            }}
-            onKeyDown={e => e.key === 'Enter' && e.currentTarget.blur()}
-          />
-        </td>
-        <td style={{ ...cell.num, color: variance == null ? '#c0bdb7' : bad ? T.danger : T.success, fontWeight: variance != null ? 600 : 400 }}>
-          {variance == null ? '—' : `${variance > 0 ? '+' : ''}${Math.round(variance).toLocaleString()}`}
-        </td>
-      </>}
     </tr>
   )
 }
 
 // Computed statement line (Net Revenue, Gross Profit, Operating Income) —
 // rendered even when the section it follows has no activity.
-function ComputedRow({ label, data, months, showBudget }) {
+function ComputedRow({ label, data, months }) {
   return (
     <tr style={{ background:'#EBF1F7', borderBottom:`2px solid #B8CDE0` }}>
       <td style={{ ...cell.td, fontWeight:700, color:T.navy, position:'sticky', left:0, background:'#EBF1F7' }}>{label}</td>
@@ -571,7 +484,6 @@ function ComputedRow({ label, data, months, showBudget }) {
       <td style={{ ...cell.num, borderLeft:`2px solid ${T.border}`, fontWeight:700, color: data.total < 0 ? T.danger : T.navy }}>
         {fmtCell(data.total)}
       </td>
-      {showBudget && <><td style={cell.num}></td><td style={cell.num}></td></>}
     </tr>
   )
 }
@@ -579,7 +491,7 @@ function ComputedRow({ label, data, months, showBudget }) {
 const cell = {
   th:  { padding:'6px 8px', background:T.page, fontSize:9.5, fontWeight:700, color:T.gold, textTransform:'uppercase', letterSpacing:'.06em', whiteSpace:'nowrap', borderBottom:`2px solid ${T.border}` },
   td:  { padding:'3px 8px', fontSize:11.5, color:T.charcoal, whiteSpace:'nowrap', maxWidth:STMT.label, overflow:'hidden', textOverflow:'ellipsis' },
-  num: { padding:'3px 8px', fontSize:11.5, color:T.charcoal, textAlign:'right', fontVariantNumeric:'tabular-nums', whiteSpace:'nowrap' },
+  num: { padding:'3px 8px', fontSize:11.5, color:T.charcoal, textAlign:'right', fontVariantNumeric:'tabular-nums', whiteSpace:'nowrap', overflow:'hidden' },
 }
 
 const btn = {

@@ -1,4 +1,5 @@
 import { useState, useEffect, useRef } from 'react'
+import { createPortal } from 'react-dom'
 import { T } from '../lib/theme'
 
 // Small ⓘ affordance that explains where a number comes from.
@@ -6,17 +7,27 @@ import { T } from '../lib/theme'
 // Opens on hover for mouse users and on click for touch/keyboard users, so the
 // explanation is reachable either way. Everything is a <span> because these sit
 // inside <h3> and card labels, where a <div> would be invalid markup.
+//
+// The panel is portalled to <body> and positioned fixed rather than absolutely
+// inside the wrapper. On the statements these sit in table cells that clip
+// (truncating labels) inside a horizontally scrolling container that clips
+// again — an absolutely positioned panel was simply cut off and looked broken.
 export default function InfoTip({ title, children, width = 290 }) {
   const [open,  setOpen]  = useState(false)
   const [hover, setHover] = useState(false)
-  const [flip,  setFlip]  = useState(false)
-  const ref = useRef(null)
+  const [overPanel, setOverPanel] = useState(false)  // the panel is outside the
+  const [pos, setPos] = useState(null)               // wrapper now, so it needs
+  const ref = useRef(null)                           // its own hover tracking
+  const panelRef = useRef(null)
 
-  const shown = open || hover
+  const shown = open || hover || overPanel
 
   useEffect(() => {
     if (!open) return
-    const onDoc = e => { if (!ref.current?.contains(e.target)) setOpen(false) }
+    const onDoc = e => {
+      if (ref.current?.contains(e.target) || panelRef.current?.contains(e.target)) return
+      setOpen(false)
+    }
     const onKey = e => { if (e.key === 'Escape') setOpen(false) }
     document.addEventListener('mousedown', onDoc)
     document.addEventListener('keydown', onKey)
@@ -26,12 +37,29 @@ export default function InfoTip({ title, children, width = 290 }) {
     }
   }, [open])
 
-  // Anchor to whichever side keeps the panel on screen — KPI cards are narrow
-  // and the rightmost one would otherwise push the popover off the viewport.
+  // Fixed positioning doesn't follow the page, so re-measure while open — the
+  // capture phase catches inner scrollers (the statement tables) too.
   useEffect(() => {
-    if (!shown || !ref.current) return
-    const r = ref.current.getBoundingClientRect()
-    setFlip(r.left + width + 24 > window.innerWidth)
+    if (!shown) return
+    const place = () => {
+      const el = ref.current
+      if (!el) return
+      const r = el.getBoundingClientRect()
+      // Anchor to whichever side keeps the panel on screen.
+      const flip = r.left + width + 24 > window.innerWidth
+      setPos({
+        top: Math.round(r.bottom + 7),
+        left: flip ? undefined : Math.round(r.left),
+        right: flip ? Math.round(window.innerWidth - r.right) : undefined,
+      })
+    }
+    place()
+    window.addEventListener('scroll', place, true)
+    window.addEventListener('resize', place)
+    return () => {
+      window.removeEventListener('scroll', place, true)
+      window.removeEventListener('resize', place)
+    }
   }, [shown, width])
 
   return (
@@ -49,11 +77,17 @@ export default function InfoTip({ title, children, width = 290 }) {
         style={{ ...sx.dot, ...(shown ? sx.dotOn : {}) }}
       >i</button>
 
-      {shown && (
-        <span role="tooltip" style={{ ...sx.pop, width, ...(flip ? { right: 0 } : { left: 0 }) }}>
+      {shown && pos && typeof document !== 'undefined' && createPortal(
+        <span
+          role="tooltip" ref={panelRef}
+          onMouseEnter={() => setOverPanel(true)}
+          onMouseLeave={() => setOverPanel(false)}
+          style={{ ...sx.pop, width, top: pos.top, left: pos.left, right: pos.right }}
+        >
           {title && <span style={sx.popTitle}>{title}</span>}
           <span style={sx.popBody}>{children}</span>
-        </span>
+        </span>,
+        document.body
       )}
     </span>
   )
@@ -73,7 +107,7 @@ const sx = {
   },
   dotOn: { borderColor: T.navy, background: T.navy, color: '#fff' },
   pop: {
-    position: 'absolute', top: 'calc(100% + 7px)', zIndex: 200,
+    position: 'fixed', zIndex: 2000,
     display: 'block', background: '#fff', border: `1px solid ${T.border}`,
     borderRadius: 7, boxShadow: '0 10px 30px rgba(27,58,92,.16)', padding: '10px 13px',
     textTransform: 'none', letterSpacing: 'normal', textAlign: 'left', cursor: 'default',

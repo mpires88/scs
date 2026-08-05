@@ -37,7 +37,10 @@ export function boundCategoryOwner(registry, category) {
   return registry.find(e => (e.boundCategories || []).includes(category)) ?? null
 }
 
-export function buildBalanceSheet({ txns, accounts, year, registry = [] }) {
+// `columns` overrides the month numbers to show. The combined Financial
+// Statements page passes the same set to all three statements so a given month
+// lands in the same column on each; alone, the sheet picks its own.
+export function buildBalanceSheet({ txns, accounts, year, registry = [], columns = null }) {
   if (!year) return null
   const sectionOf = new Map(accounts.map(a => [a.name, a.pl_section]))
   const matchCache = new Map() // feed label → registry entry | null
@@ -99,9 +102,11 @@ export function buildBalanceSheet({ txns, accounts, year, registry = [] }) {
   const allYms = [...new Set([...sums.values()].flatMap(m => [...m.keys()]))].sort()
   const firstYm = allYms[0], lastYm = allYms[allYms.length - 1]
 
-  // Month-end columns for the selected year, clipped to the data range.
+  // Month-end columns for the selected year, clipped to the data range unless
+  // the caller dictates the set.
   const months = []
-  for (let m = 1; m <= 12; m++) {
+  if (columns?.length) months.push(...columns)
+  else for (let m = 1; m <= 12; m++) {
     const ym = `${year}-${String(m).padStart(2, '0')}`
     if (ym >= firstYm.slice(0, 7) && ym <= lastYm) months.push(m)
   }

@@ -103,8 +103,8 @@ export default function ReportsCF({ clientId, headerLeft = null, shared = null, 
 
   const years = useMemo(() => cashFlowYears(txns, registry), [txns, registry])
   const cf = useMemo(
-    () => buildCashFlow({ txns, accounts, registry, year, period }),
-    [txns, accounts, registry, year, period]
+    () => buildCashFlow({ txns, accounts, registry, year, period, columns: shared?.columns }),
+    [txns, accounts, registry, year, period, shared?.columns]
   )
 
   const rowsFor = useMemo(() => {
@@ -204,9 +204,9 @@ export default function ReportsCF({ clientId, headerLeft = null, shared = null, 
             <option value="monthly">Monthly</option>
             <option value="yearly">Yearly — all years</option>
           </select>
-          </>)}
           <button style={btn.sec} onClick={exportCSV} disabled={!cf}>↓ Export CSV</button>
-          {!shared && <button style={btn.sec} onClick={() => window.print()} disabled={!cf}>🖨 Print / PDF</button>}
+          <button style={btn.sec} onClick={() => window.print()} disabled={!cf}>🖨 Print / PDF</button>
+          </>)}
         </div>
       </header>
 
@@ -233,8 +233,8 @@ export default function ReportsCF({ clientId, headerLeft = null, shared = null, 
             Chart of Accounts page — map your checking account there and import its transactions.
           </p>
         ) : (
-          <div style={{ display:'inline-block', verticalAlign:'top', maxWidth:'100%', overflowX:'auto', background:T.card, border:`1px solid ${T.border}`, borderRadius:7 }}>
-            <table style={{ borderCollapse:'collapse', width:'auto', fontSize:11.5 }}>
+          <div className="stmt-scroll" style={{ display:'inline-block', verticalAlign:'top', maxWidth:'100%', overflowX:'auto', background:T.card, border:`1px solid ${T.border}`, borderRadius:7 }}>
+            <table style={{ borderCollapse:'collapse', width:'auto', tableLayout:'fixed', fontSize:11.5 }}>
               <thead>
                 <tr>
                   <th style={{ ...cell.th, textAlign:'left', width:STMT.label, minWidth:STMT.label, maxWidth:STMT.label, position:'sticky', left:0, background:T.page, zIndex:1 }}>Line</th>
@@ -272,8 +272,10 @@ export default function ReportsCF({ clientId, headerLeft = null, shared = null, 
                     {rowsFor[sec.section].map(r => (
                       <tr key={r.name} style={{ borderBottom:'1px solid #F0EEE9' }}>
                         <td style={{ ...cell.td, paddingLeft:16, position:'sticky', left:0, background:T.card }}>
-                          <span style={{ display:'inline-flex', alignItems:'center', gap:5 }}>
-                            {r.name}
+                          {/* Truncate the TEXT, not the cell: the cell clips, and
+                              the icon has to stay visible on a long label. */}
+                          <span style={{ display:'inline-flex', alignItems:'center', gap:5, maxWidth:'100%' }}>
+                            <span style={{ overflow:'hidden', textOverflow:'ellipsis', whiteSpace:'nowrap' }}>{r.name}</span>
                             {r.note && <InfoTip title={r.name}>{r.note}</InfoTip>}
                           </span>
                         </td>
@@ -346,7 +348,7 @@ export default function ReportsCF({ clientId, headerLeft = null, shared = null, 
 const cell = {
   th:  { padding:'6px 8px', background:T.page, fontSize:9.5, fontWeight:700, color:T.gold, textTransform:'uppercase', letterSpacing:'.06em', whiteSpace:'nowrap', borderBottom:`2px solid ${T.border}` },
   td:  { padding:'3px 8px', fontSize:11.5, color:T.charcoal, whiteSpace:'nowrap', maxWidth:STMT.label, overflow:'hidden', textOverflow:'ellipsis' },
-  num: { padding:'3px 8px', fontSize:11.5, color:T.charcoal, textAlign:'right', fontVariantNumeric:'tabular-nums', whiteSpace:'nowrap' },
+  num: { padding:'3px 8px', fontSize:11.5, color:T.charcoal, textAlign:'right', fontVariantNumeric:'tabular-nums', whiteSpace:'nowrap', overflow:'hidden' },
 }
 
 const btn = {

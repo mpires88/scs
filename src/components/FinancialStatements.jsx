@@ -14,6 +14,7 @@ import Link from 'next/link'
 import { supabase, fetchAll } from '../lib/supabase'
 import { fetchAccounts } from '../lib/chartOfAccounts'
 import { getSetting } from '../lib/settings'
+import ReportsKPI from './ReportsKPI'
 import ReportsPL from './ReportsPL'
 import ReportsBS from './ReportsBS'
 import ReportsCF from './ReportsCF'
@@ -21,9 +22,10 @@ import { DisclosureBanner } from './Disclosure'
 import { T } from '../lib/theme'
 
 const SECTIONS = [
-  { key: 'pl', label: 'Profit & Loss', Comp: ReportsPL, hint: 'What the business earned over a period' },
-  { key: 'bs', label: 'Balance Sheet', Comp: ReportsBS, hint: 'What it owns and owes at a point in time' },
-  { key: 'cf', label: 'Cash Flow',     Comp: ReportsCF, hint: 'Money that actually moved through the bank' },
+  { key: 'kpi', label: 'KPIs',          Comp: ReportsKPI, hint: 'Margins, breakeven, stock and cash health at a glance' },
+  { key: 'pl',  label: 'Profit & Loss', Comp: ReportsPL,  hint: 'What the business earned over a period' },
+  { key: 'bs',  label: 'Balance Sheet', Comp: ReportsBS,  hint: 'What it owns and owes at a point in time' },
+  { key: 'cf',  label: 'Cash Flow',     Comp: ReportsCF,  hint: 'Money that actually moved through the bank' },
 ]
 
 export default function FinancialStatements({ clientId }) {
@@ -38,10 +40,10 @@ export default function FinancialStatements({ clientId }) {
   const [hideZero, setHideZero] = useState(false)
 
   const [printOpen, setPrintOpen] = useState(false)
-  const [printSel,  setPrintSel]  = useState({ pl: true, bs: true, cf: true })
+  const [printSel,  setPrintSel]  = useState({ kpi: true, pl: true, bs: true, cf: true })
 
   const [csvOpen, setCsvOpen] = useState(false)
-  const [csvSel,  setCsvSel]  = useState({ pl: true, bs: true, cf: true })
+  const [csvSel,  setCsvSel]  = useState({ kpi: true, pl: true, bs: true, cf: true })
   // Each statement registers its CSV line-builder here, so the Export picker
   // can bundle any selection of them into one file.
   const csvSink = useRef({})
@@ -97,7 +99,56 @@ export default function FinancialStatements({ clientId }) {
     return () => window.removeEventListener('resize', measure)
   }, [loading, years.length, period])
   const data   = useMemo(() => ({ txns, accounts, registry }), [txns, accounts, registry])
-  const shared = useMemo(() => ({ year, period, hideZero }), [year, period, hideZero])
+  // One column set for all three statements. Each would otherwise derive its
+  // own from its own rows — the cash flow only sees months with bank activity,
+  // the P&L only months with categorized rows — and a month missing from one
+  // shifts every column after it out of line with the others. The union is
+  // safe: a statement with nothing in a column simply shows a dash.
+  const columns = useMemo(() => {
+    const ymOf = t => (t.transaction_date || '').slice(0, 7)
+    if (period === 'yearly') {
+      return [...new Set(txns.map(t => +(t.transaction_date || '').slice(0, 4)).filter(Boolean))]
+        .sort((a, b) => a - b)
+    }
+    if (period === 'all') {
+      const yms = [...new Set(txns.map(ymOf).filter(Boolean))].sort()
+      if (!yms.length) return []
+      // Continuous, so a quiet month is a zero column rather than a gap.
+      const out = []
+      let [y, m] = yms[0].split('-').map(Number)
+      for (let ym = yms[0]; ym <= yms[yms.length - 1];) {
+        out.push(ym)
+        m += 1; if (m > 12) { m = 1; y += 1 }
+        ym = `${y}-${String(m).padStart(2, '0')}`
+      }
+      return out
+    }
+    if (!year) return []
+    return [...new Set(
+      txns.filter(t => (t.transaction_date || '').startsWith(String(year)))
+          .map(t => +(t.transaction_date || '').slice(5, 7)).filter(Boolean)
+    )].sort((a, b) => a - b)
+  }, [txns, year, period])
+
+  const shared = useMemo(
+    () => ({ year, period, hideZero, columns }),
+    [year, period, hideZero, columns])
+
+  // Identical columns only line up while the three scroll together; each table
+  // has its own horizontal scroller, so mirror them.
+  useEffect(() => {
+    const els = [...document.querySelectorAll('.stmt-scroll')]
+    if (els.length < 2) return
+    let syncing = false
+    const onScroll = e => {
+      if (syncing) return
+      syncing = true
+      els.forEach(el => { if (el !== e.currentTarget) el.scrollLeft = e.currentTarget.scrollLeft })
+      requestAnimationFrame(() => { syncing = false })
+    }
+    els.forEach(el => el.addEventListener('scroll', onScroll))
+    return () => els.forEach(el => el.removeEventListener('scroll', onScroll))
+  }, [loading, columns, hideZero, period, year])
 
   const selectedCount = SECTIONS.filter(s => printSel[s.key]).length
   const doPrint = () => {
@@ -227,11 +278,11 @@ export default function FinancialStatements({ clientId }) {
                     </label>
                   ))}
                   <div style={{ display:'flex', gap:6, marginTop:9, paddingTop:9, borderTop:`1px solid ${T.border}` }}>
-                    <button style={miniBtn} onClick={() => setCsvSel({ pl:true, bs:true, cf:true })}>All three</button>
+                    <button style={miniBtn} onClick={() => setCsvSel({ kpi:true, pl:true, bs:true, cf:true })}>All</button>
                     <button
                       style={{ ...miniBtn, flex:1, background:T.navy, color:'#fff', borderColor:T.navy, opacity: csvCount ? 1 : .5 }}
                       disabled={!csvCount} onClick={doExportCsv}
-                    >Export {csvCount === SECTIONS.length ? 'all 3' : csvCount}</button>
+                    >Export {csvCount === SECTIONS.length ? 'all' : csvCount}</button>
                   </div>
                 </div>
               </>
@@ -263,11 +314,11 @@ export default function FinancialStatements({ clientId }) {
                     </label>
                   ))}
                   <div style={{ display:'flex', gap:6, marginTop:9, paddingTop:9, borderTop:`1px solid ${T.border}` }}>
-                    <button style={miniBtn} onClick={() => setPrintSel({ pl:true, bs:true, cf:true })}>All three</button>
+                    <button style={miniBtn} onClick={() => setPrintSel({ kpi:true, pl:true, bs:true, cf:true })}>All</button>
                     <button
                       style={{ ...miniBtn, flex:1, background:T.navy, color:'#fff', borderColor:T.navy, opacity: selectedCount ? 1 : .5 }}
                       disabled={!selectedCount} onClick={doPrint}
-                    >Print {selectedCount === SECTIONS.length ? 'all 3' : selectedCount}</button>
+                    >Print {selectedCount === SECTIONS.length ? 'all' : selectedCount}</button>
                   </div>
                 </div>
               </>

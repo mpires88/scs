@@ -223,7 +223,11 @@ export default function Shell({ children }) {
       </aside>
 
       {/* ── Main content ── */}
-      <main style={{ flex: 1, overflow: 'auto', minWidth: 0 }}>
+      {/* overflowX: clip (not auto) — a non-scrolling overflow:auto ancestor
+          would become every sticky header's scrollport and stop them sticking
+          while the body does the actual scrolling. clip still contains wide
+          children without creating a scroll container. */}
+      <main style={{ flex: 1, minWidth: 0, overflowX: 'clip' }}>
         <ErrorBoundary resetKey={pathname}>
           {children}
         </ErrorBoundary>

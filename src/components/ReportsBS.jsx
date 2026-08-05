@@ -80,7 +80,7 @@ export default function ReportsBS({ clientId, headerLeft = null, shared = null, 
   // and keep only its final column, so each year shows its closing balance.
   // Reuses buildBalanceSheet rather than re-deriving balances a second way.
   const bs = useMemo(() => {
-    if (period === 'monthly') return buildBalanceSheet({ txns, accounts, year, registry })
+    if (period === 'monthly') return buildBalanceSheet({ txns, accounts, year, registry, columns: shared?.columns })
 
     const built = years
       .map(y => [y, buildBalanceSheet({ txns, accounts, year: y, registry })])
@@ -166,7 +166,7 @@ export default function ReportsBS({ clientId, headerLeft = null, shared = null, 
       unmappedLabels: [...new Set(built.flatMap(([, b]) => b.unmappedLabels))],
       lastYear: last,
     }
-  }, [txns, accounts, year, registry, period, years])
+  }, [txns, accounts, year, registry, period, years, shared?.columns])
 
   const entriesFor = useMemo(() => {
     if (!bs) return {}
@@ -283,9 +283,9 @@ export default function ReportsBS({ clientId, headerLeft = null, shared = null, 
             <option value="monthly">Monthly</option>
             <option value="yearly">Yearly — all years</option>
           </select>
-          </>)}
           <button style={btn.sec} onClick={exportCSV} disabled={!bs}>↓ Export CSV</button>
-          {!shared && <button style={btn.sec} onClick={() => window.print()} disabled={!bs}>🖨 Print / PDF</button>}
+          <button style={btn.sec} onClick={() => window.print()} disabled={!bs}>🖨 Print / PDF</button>
+          </>)}
         </div>
       </header>
 
@@ -314,8 +314,8 @@ export default function ReportsBS({ clientId, headerLeft = null, shared = null, 
             No transactions yet — import bank activity to build the balance sheet.
           </p>
         ) : (
-          <div style={{ display:'inline-block', verticalAlign:'top', maxWidth:'100%', overflowX:'auto', background:T.card, border:`1px solid ${T.border}`, borderRadius:7 }}>
-            <table style={{ borderCollapse:'collapse', width:'auto', fontSize:11.5 }}>
+          <div className="stmt-scroll" style={{ display:'inline-block', verticalAlign:'top', maxWidth:'100%', overflowX:'auto', background:T.card, border:`1px solid ${T.border}`, borderRadius:7 }}>
+            <table style={{ borderCollapse:'collapse', width:'auto', tableLayout:'fixed', fontSize:11.5 }}>
               <thead>
                 <tr>
                   <th style={{ ...cell.th, textAlign:'left', width:STMT.label, minWidth:STMT.label, maxWidth:STMT.label, position:'sticky', left:0, background:T.page, zIndex:1 }}>Account</th>
@@ -435,7 +435,7 @@ function BsRow({ r, label, indent = false, months }) {
 const cell = {
   th:  { padding:'6px 8px', background:T.page, fontSize:9.5, fontWeight:700, color:T.gold, textTransform:'uppercase', letterSpacing:'.06em', whiteSpace:'nowrap', borderBottom:`2px solid ${T.border}` },
   td:  { padding:'3px 8px', fontSize:11.5, color:T.charcoal, whiteSpace:'nowrap', maxWidth:STMT.label, overflow:'hidden', textOverflow:'ellipsis' },
-  num: { padding:'3px 8px', fontSize:11.5, color:T.charcoal, textAlign:'right', fontVariantNumeric:'tabular-nums', whiteSpace:'nowrap' },
+  num: { padding:'3px 8px', fontSize:11.5, color:T.charcoal, textAlign:'right', fontVariantNumeric:'tabular-nums', whiteSpace:'nowrap', overflow:'hidden' },
 }
 
 const btn = {

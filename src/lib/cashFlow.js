@@ -66,7 +66,10 @@ export function cashFlowYears(txns, registry = []) {
   )].sort()
 }
 
-export function buildCashFlow({ txns, accounts = [], registry = [], year, period = 'monthly' }) {
+// `columns` overrides which columns to show, so the combined page can line all
+// three statements up on the same months. A column with no cash reads zero;
+// nothing is dropped, because the page passes a superset of what this derives.
+export function buildCashFlow({ txns, accounts = [], registry = [], year, period = 'monthly', columns = null }) {
   const yearly = period === 'yearly'
   const allDates = period === 'all'   // every month of every year, side by side
   if (!yearly && !allDates && !year) return null
@@ -100,6 +103,7 @@ export function buildCashFlow({ txns, accounts = [], registry = [], year, period
     }
     months = filled
   }
+  if (columns?.length) months = [...columns]
 
   const role = t => stripAcctNum((t.category || '').trim()) || UNCLASSIFIED
   // Categories the registry binds to a card — payments to it are financing.
