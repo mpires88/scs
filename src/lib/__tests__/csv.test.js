@@ -1,5 +1,27 @@
 import { describe, it, expect } from 'vitest'
-import { parseCSVText, parseBankCSV, parseDate, fingerprint } from '../csv'
+import { parseCSVText, parseBankCSV, parseDate, fingerprint, autoDetectCols } from '../csv'
+
+describe('autoDetectCols — Capital One card export', () => {
+  // Real header row from a Capital One transaction_download CSV.
+  const headers = ['Transaction Date', 'Posted Date', 'Card No.', 'Description', 'Category', 'Debit', 'Credit']
+
+  it('maps the card export: transaction date and split debit/credit, but never Card No. as account', () => {
+    const { cols, splitAmounts } = autoDetectCols(headers)
+    expect(cols.transaction_date).toBe('Transaction Date') // not Posted Date
+    expect(cols.account).toBe('') // "3877" is not an account label — bank name fallback applies
+    expect(splitAmounts).toBe(true)
+    expect(cols.debit).toBe('Debit')
+    expect(cols.credit).toBe('Credit')
+    // Capital One's own merchant categories DO auto-map — the user should
+    // clear this mapping on import so "Gas/Automotive" etc. don't reach the DB.
+    expect(cols.category).toBe('Category')
+  })
+
+  it('still prefers real account columns when a bank export has them', () => {
+    const { cols } = autoDetectCols(['Date', 'Description', 'Amount', 'Account Name', 'Card No.'])
+    expect(cols.account).toBe('Account Name')
+  })
+})
 
 describe('parseDate', () => {
   it('parses all six supported formats', () => {

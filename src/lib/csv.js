@@ -130,6 +130,9 @@ export function autoDetectCols(headers) {
       transaction_date: find(['date', 'posted date', 'posting date', 'transaction date', 'trans date']),
       description:      find(['description', 'memo', 'payee', 'narrative', 'details', 'name', 'transaction description']),
       amount:           splitAmounts ? '' : find(['amount', 'transaction amount', 'net amount']),
+      // 'Card No.' is deliberately NOT an account candidate: a card-number
+      // fragment ("3877") is a terrible account label. Card exports have no
+      // real account column — the import falls back to the bank name instead.
       account:          find(['account name', 'account number', 'account']),
       reference_id:     find(['ref num', 'reference', 'ref', 'check number', 'transaction id', 'confirmation']),
       category:         find(['category']),
