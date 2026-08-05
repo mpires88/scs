@@ -26,6 +26,8 @@ export default function ReportsBS({ clientId }) {
   const [loading,  setLoading]  = useState(true)
   const [error,    setError]    = useState(null)
   const [year,     setYear]     = useState(null)
+  const [hideZero, setHideZero] = useState(false)
+  const [period,   setPeriod]   = useState('monthly')  // 'monthly' | 'yearly'
 
   useEffect(() => {
     let cancelled = false
@@ -56,24 +58,87 @@ export default function ReportsBS({ clientId }) {
   }, [clientId])
 
   const years = useMemo(() => balanceSheetYears(txns), [txns])
-  const bs = useMemo(
-    () => buildBalanceSheet({ txns, accounts, year, registry }),
-    [txns, accounts, year, registry]
-  )
+
+  // Monthly: one sheet, a column per month end. Yearly: build a sheet per year
+  // and keep only its final column, so each year shows its closing balance.
+  // Reuses buildBalanceSheet rather than re-deriving balances a second way.
+  const bs = useMemo(() => {
+    if (period !== 'yearly') return buildBalanceSheet({ txns, accounts, year, registry })
+
+    const built = years
+      .map(y => [y, buildBalanceSheet({ txns, accounts, year: y, registry })])
+      .filter(([, b]) => b)
+    if (!built.length) return null
+    const cols = built.map(([y]) => y)
+    const lastCol = cols[cols.length - 1]
+
+    // Most recent year first so it sets section and row order (it has the most
+    // lines); years that carry a line no longer present get appended after.
+    const secMap = new Map()
+    ;[...built].reverse().forEach(([y, b]) => {
+      const endM = b.months[b.months.length - 1]
+      b.sections.forEach(sec => {
+        if (!secMap.has(sec.section)) secMap.set(sec.section, { section: sec.section, rowMap: new Map(), totals: {} })
+        const s = secMap.get(sec.section)
+        sec.rows.forEach(r => {
+          if (!s.rowMap.has(r.name)) s.rowMap.set(r.name, { ...r, byMonth: {}, total: 0 })
+          s.rowMap.get(r.name).byMonth[y] = r.byMonth[endM] ?? 0
+        })
+        s.totals[y] = sec.totals[endM] ?? 0
+      })
+    })
+    const sections = [...secMap.values()].map(s => ({
+      section: s.section,
+      rows: [...s.rowMap.values()].map(r => ({ ...r, total: r.byMonth[lastCol] ?? 0 })),
+      totals: s.totals,
+      total: s.totals[lastCol] ?? 0,
+    }))
+
+    const computed = {}
+    ;['assets', 'liabilities', 'equity', 'liabEquity'].forEach(k => {
+      const byMonth = {}
+      built.forEach(([y, b]) => { byMonth[y] = b.computed[k].byMonth[b.months[b.months.length - 1]] ?? 0 })
+      computed[k] = { byMonth, total: byMonth[lastCol] ?? 0 }
+    })
+
+    const last = built[built.length - 1][1]
+    return {
+      months: cols, sections, computed, yearly: true,
+      hasUncat: built.some(([, b]) => b.hasUncat),
+      unmappedLabels: [...new Set(built.flatMap(([, b]) => b.unmappedLabels))],
+      lastYear: last,
+    }
+  }, [txns, accounts, year, registry, period, years])
+
   const entriesFor = useMemo(() => {
     if (!bs) return {}
+    const cols = bs.months
+    const flat = (by, tot) => cols.every(m => Math.abs(by[m] ?? 0) < 0.005) && Math.abs(tot ?? 0) < 0.005
+    const zeroRow = r => flat(r.byMonth, r.total)
     const map = {}
-    bs.sections.forEach(sec => { map[sec.section] = groupRowsByParent(sec.rows, accounts, sec.section) })
+    bs.sections.forEach(sec => {
+      let entries = groupRowsByParent(sec.rows, accounts, sec.section)
+      if (hideZero) {
+        entries = entries.flatMap(en => {
+          if (en.kind === 'row') return zeroRow(en) ? [] : [en]
+          const children = en.children.filter(r => !zeroRow(r))
+          const own = en.own && !zeroRow(en.own) ? en.own : null
+          if (!children.length && !own && flat(en.totals, en.total)) return []
+          return [{ ...en, children, own }]
+        })
+      }
+      map[sec.section] = entries
+    })
     return map
-  }, [bs, accounts])
+  }, [bs, accounts, hideZero])
 
   const exportCSV = () => {
     if (!bs) return
     const { months, sections, computed } = bs
-    const lines = [['Account', ...months.map(m => `${MON[m]} ${year}`)]]
+    const lines = [['Account', ...months.map(m => bs.yearly ? String(m) : `${MON[m]} ${year}`)]]
     const rowLine = (label, r) => lines.push([label, ...months.map(m => (r.byMonth[m] ?? 0).toFixed(2))])
     sections.forEach(sec => {
-      if (!sec.rows.length) return
+      if (!entriesFor[sec.section]?.length) return
       lines.push([sec.section])
       entriesFor[sec.section].forEach(en => {
         if (en.kind === 'row') { rowLine(`  ${en.name}`, en); return }
@@ -93,7 +158,7 @@ export default function ReportsBS({ clientId }) {
     const url = URL.createObjectURL(blob)
     const a = document.createElement('a')
     a.href = url
-    a.download = `SCS-BalanceSheet-${year}.csv`
+    a.download = `SCS-BalanceSheet-${bs.yearly ? 'all-years' : year}.csv`
     a.click()
     URL.revokeObjectURL(url)
   }
@@ -126,10 +191,25 @@ export default function ReportsBS({ clientId }) {
         <div>
           <h2 style={{ fontSize:14, fontWeight:600, color:T.navy, margin:'0 0 2px' }}>Balance Sheet</h2>
           <p style={{ fontSize:11, color:'rgba(74,74,74,0.65)', margin:0 }}>
-            Sports Card Station {year ? `· ${year}` : ''} · balances as of each month end
+            Sports Card Station {bs?.yearly ? '· all years' : (year ? `· ${year}` : '')} · balances as of each {bs?.yearly ? 'year' : 'month'} end
           </p>
         </div>
         <div className="bs-controls" style={{ display:'flex', gap:8, alignItems:'center', flexWrap:'wrap' }}>
+          <label
+            style={{ display:'flex', alignItems:'center', gap:6, fontSize:11, color:T.charcoal, cursor:'pointer', userSelect:'none' }}
+            title="Hide any line that is zero in every column. Section and computed totals are unchanged."
+          >
+            <input type="checkbox" checked={hideZero} onChange={e => setHideZero(e.target.checked)} />
+            Hide $0 rows
+          </label>
+          <select
+            style={{ fontSize:11, padding:'4px 8px', border:`1px solid ${T.border}`, borderRadius:5, color:T.charcoal, background:'#fff', outline:'none' }}
+            value={period} onChange={e => setPeriod(e.target.value)}
+            title="Monthly shows the selected year's month-end balances; Yearly shows each year's closing balance side by side."
+          >
+            <option value="monthly">Monthly</option>
+            <option value="yearly">Yearly — all years</option>
+          </select>
           <button style={btn.sec} onClick={exportCSV} disabled={!bs}>↓ Export CSV</button>
           <button style={btn.sec} onClick={() => window.print()} disabled={!bs}>🖨 Print / PDF</button>
         </div>
@@ -137,7 +217,7 @@ export default function ReportsBS({ clientId }) {
 
       <div style={{ padding:'20px 28px' }}>
 
-        {years.length > 1 && (
+        {years.length > 1 && !bs?.yearly && (
           <div className="bs-controls" style={{ display:'flex', gap:4, marginBottom:16 }}>
             {years.map(y => (
               <button key={y} onClick={() => setYear(y)}
@@ -152,18 +232,23 @@ export default function ReportsBS({ clientId }) {
           </div>
         )}
 
+        {/* The table shrinks to fit up to the full width, then scrolls — at
+            width:100% it spreads its slack across the columns and pads every
+            figure out. */}
         {!bs ? (
           <p style={{ color:'#9ca3af', fontSize:13, textAlign:'center', padding:'48px 0' }}>
             No transactions yet — import bank activity to build the balance sheet.
           </p>
         ) : (
-          <div style={{ overflowX:'auto', background:T.card, border:`1px solid ${T.border}`, borderRadius:7 }}>
-            <table style={{ borderCollapse:'collapse', width:'100%', fontSize:11.5 }}>
+          <div style={{ display:'inline-block', verticalAlign:'top', maxWidth:'100%', overflowX:'auto', background:T.card, border:`1px solid ${T.border}`, borderRadius:7 }}>
+            <table style={{ borderCollapse:'collapse', width:'auto', fontSize:11.5 }}>
               <thead>
                 <tr>
-                  <th style={{ ...cell.th, textAlign:'left', minWidth:230, position:'sticky', left:0, background:T.page, zIndex:1 }}>Account</th>
+                  <th style={{ ...cell.th, textAlign:'left', minWidth:150, position:'sticky', left:0, background:T.page, zIndex:1 }}>Account</th>
                   {bs.months.map(m => (
-                    <th key={m} style={{ ...cell.th, textAlign:'right', minWidth:78 }}>{MON[m]} {String(year).slice(2)}</th>
+                    <th key={m} style={{ ...cell.th, textAlign:'right', minWidth: bs.yearly ? 62 : 54 }}>
+                      {bs.yearly ? m : <>{MON[m]} {String(year).slice(2)}</>}
+                    </th>
                   ))}
                 </tr>
               </thead>
@@ -176,10 +261,10 @@ export default function ReportsBS({ clientId }) {
                   }[sec.section]
                   return (
                     <Fragment key={sec.section}>
-                      {sec.rows.length > 0 && (
+                      {entriesFor[sec.section].length > 0 && (
                         <>
                           <tr>
-                            <td colSpan={999} style={{ padding:'9px 12px 4px', fontSize:9.5, fontWeight:700, color:T.gold, textTransform:'uppercase', letterSpacing:'.07em', background:T.card }}>
+                            <td colSpan={999} style={{ padding:'7px 8px 3px', fontSize:9.5, fontWeight:700, color:T.gold, textTransform:'uppercase', letterSpacing:'.07em', background:T.card }}>
                               {sec.section}
                             </td>
                           </tr>
@@ -188,13 +273,13 @@ export default function ReportsBS({ clientId }) {
                             return (
                               <Fragment key={en.name}>
                                 <tr style={{ borderBottom:`1px solid #F0EEE9` }}>
-                                  <td style={{ ...cell.td, paddingLeft:22, fontWeight:600, position:'sticky', left:0, background:T.card }}>{en.name}</td>
+                                  <td style={{ ...cell.td, paddingLeft:16, fontWeight:600, position:'sticky', left:0, background:T.card }}>{en.name}</td>
                                   {bs.months.map(m => <td key={m} style={cell.num}></td>)}
                                 </tr>
                                 {en.children.map(r => <BsRow key={r.name} r={r} months={bs.months} indent />)}
                                 {en.own && <BsRow key={`${en.name} (other)`} r={en.own} label={`${en.name} (other)`} months={bs.months} indent />}
                                 <tr style={{ borderBottom:`1px solid #F0EEE9` }}>
-                                  <td style={{ ...cell.td, paddingLeft:22, fontWeight:600, color:T.navy, position:'sticky', left:0, background:T.card }}>Total {en.name}</td>
+                                  <td style={{ ...cell.td, paddingLeft:16, fontWeight:600, color:T.navy, position:'sticky', left:0, background:T.card }}>Total {en.name}</td>
                                   {bs.months.map(m => (
                                     <td key={m} style={{ ...cell.num, fontWeight:600 }}>{fmtCell(en.totals[m] ?? 0)}</td>
                                   ))}
@@ -254,7 +339,7 @@ function BsRow({ r, label, indent = false, months }) {
   return (
     <tr style={{ borderBottom:`1px solid #F0EEE9` }}>
       <td style={{
-        ...cell.td, paddingLeft: indent ? 38 : 22, position:'sticky', left:0, background:T.card,
+        ...cell.td, paddingLeft: indent ? 26 : 16, position:'sticky', left:0, background:T.card,
         ...(r.warn ? { color:'#92400E', fontWeight:600 } : {}),
         ...(r.derived && !r.warn && !r.unmapped ? { fontStyle:'italic' } : {}),
       }}>
@@ -274,9 +359,9 @@ function BsRow({ r, label, indent = false, months }) {
 }
 
 const cell = {
-  th:  { padding:'8px 12px', background:T.page, fontSize:9.5, fontWeight:700, color:T.gold, textTransform:'uppercase', letterSpacing:'.06em', whiteSpace:'nowrap', borderBottom:`2px solid ${T.border}` },
-  td:  { padding:'5px 12px', fontSize:11.5, color:T.charcoal, whiteSpace:'nowrap' },
-  num: { padding:'5px 12px', fontSize:11.5, color:T.charcoal, textAlign:'right', fontVariantNumeric:'tabular-nums', whiteSpace:'nowrap' },
+  th:  { padding:'6px 8px', background:T.page, fontSize:9.5, fontWeight:700, color:T.gold, textTransform:'uppercase', letterSpacing:'.06em', whiteSpace:'nowrap', borderBottom:`2px solid ${T.border}` },
+  td:  { padding:'3px 8px', fontSize:11.5, color:T.charcoal, whiteSpace:'nowrap' },
+  num: { padding:'3px 8px', fontSize:11.5, color:T.charcoal, textAlign:'right', fontVariantNumeric:'tabular-nums', whiteSpace:'nowrap' },
 }
 
 const btn = {
