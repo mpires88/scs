@@ -1,5 +1,8 @@
-import { useState, useEffect, useCallback, useRef, Fragment } from 'react'
+import { useState, useEffect, useCallback, useMemo, useRef, Fragment } from 'react'
 import { supabase } from '../lib/supabase'
+import { fetchSectionMap } from '../lib/chartOfAccounts'
+import { ADJUSTMENTS_ACCOUNT } from '../lib/insights'
+import { squareFeeRows, taxRows } from '../lib/monthEnd'
 import { T, fmt2 as fmt, fmtPeriod } from '../lib/theme'
 
 // ─── Quoted-printable decoder (handles multi-byte UTF-8) ──────────────────────
@@ -209,9 +212,78 @@ function ReportDetail({ r, cats }) {
   )
 }
 
+// ─── Upload coverage ──────────────────────────────────────────────────────────
+// One report per month, so coverage is a year-by-month grid running from the
+// first uploaded period through the last completed month — a gap is a report
+// still to chase down. Amber months were saved before the parser captured
+// returns & discounts; re-uploading the .eml fills them in.
+
+const MONTH_ABBR = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec']
+
+function CoveragePanel({ reports }) {
+  const byPeriod = {}
+  reports.forEach(r => { if (r.period) byPeriod[r.period.slice(0, 7)] = r })
+  const periods = Object.keys(byPeriod).sort()
+  if (!periods.length) return null
+
+  const now = new Date()
+  const prev = new Date(now.getFullYear(), now.getMonth() - 1, 1)
+  const lastComplete = `${prev.getFullYear()}-${String(prev.getMonth() + 1).padStart(2, '0')}`
+  const first = periods[0]
+  const last  = periods[periods.length - 1] > lastComplete ? periods[periods.length - 1] : lastComplete
+
+  const years = []
+  for (let y = +first.slice(0, 4); y <= +last.slice(0, 4); y++) years.push(y)
+
+  const badge = { display: 'inline-block', minWidth: 26, borderRadius: 3, padding: '1px 0', fontWeight: 500, cursor: 'default' }
+
+  return (
+    <div style={{ background: T.card, border: `1px solid ${T.border}`, borderRadius: 6, padding: '12px 16px', marginBottom: 24, overflowX: 'auto' }}>
+      <h3 style={{ fontSize: 10.5, fontWeight: 700, color: T.gold, textTransform: 'uppercase', letterSpacing: '.06em', margin: '0 0 10px' }}>
+        Upload Coverage
+      </h3>
+      <table style={{ borderCollapse: 'collapse', fontSize: 11 }}>
+        <thead>
+          <tr>
+            <th style={{ padding: '4px 10px 4px 0', textAlign: 'left', color: T.charcoal, fontWeight: 600 }}>Year</th>
+            {MONTH_ABBR.map(m => (
+              <th key={m} style={{ padding: '4px 6px', textAlign: 'center', color: T.charcoal, fontWeight: 500 }}>{m}</th>
+            ))}
+          </tr>
+        </thead>
+        <tbody>
+          {years.map(y => (
+            <tr key={y}>
+              <td style={{ padding: '3px 10px 3px 0', color: T.charcoal, fontWeight: 500 }}>{y}</td>
+              {MONTH_ABBR.map((label, i) => {
+                const ym = `${y}-${String(i + 1).padStart(2, '0')}`
+                if (ym < first || ym > last) return <td key={ym} style={{ padding: '3px 6px' }} />
+                const r = byPeriod[ym]
+                const partial = r && r.returns == null && r.discounts == null
+                const [bg, fg, mark, note] = !r
+                  ? [T.page, '#C0BDB7', '—', 'no report uploaded']
+                  : partial
+                    ? ['#FEF3C7', '#92400E', '✓', 'uploaded — re-upload the .eml to fill in returns & discounts']
+                    : ['#D1E8D4', '#1A5C28', '✓', 'uploaded']
+                return (
+                  <td key={ym} style={{ padding: '3px 6px', textAlign: 'center' }} title={`${label} ${y} — ${note}`}>
+                    <span style={{ ...badge, background: bg, color: fg }}>{mark}</span>
+                  </td>
+                )
+              })}
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </div>
+  )
+}
+
 // ─── Component ────────────────────────────────────────────────────────────────
 
-export default function SquareReports({ clientId }) {
+// `headerLeft` lets the combined Transactions hub put its title and tab
+// switcher where the standalone title sits; the upload count line stays.
+export default function SquareReports({ clientId, headerLeft = null }) {
   const [reports,  setReports]  = useState([])
   const [expanded, setExpanded] = useState({})   // report id → open
   const [loading,  setLoading]  = useState(true)
@@ -234,6 +306,32 @@ export default function SquareReports({ clientId }) {
 
   useEffect(() => { load() }, [load])
 
+  // Months with no report between the earliest upload and the last complete
+  // month. Each is a hole in the books: no revenue gross-up, no tax accrual.
+  const missingMonths = useMemo(() => {
+    if (!reports.length) return []
+    const have = new Set(reports.map(r => r.period))
+    const now = new Date()
+    const prev = new Date(now.getFullYear(), now.getMonth() - 1, 1)
+    const end = `${prev.getFullYear()}-${String(prev.getMonth() + 1).padStart(2, '0')}`
+    const first = reports[reports.length - 1].period // list is period-descending
+    const out = []
+    let [y, m] = first.split('-').map(Number)
+    for (let ym = first; ym <= end;) {
+      if (!have.has(ym)) out.push(ym)
+      m += 1
+      if (m > 12) { m = 1; y += 1 }
+      ym = `${y}-${String(m).padStart(2, '0')}`
+    }
+    return out
+  }, [reports])
+
+  // Reports and missing-month markers interleaved, newest first.
+  const tableRows = useMemo(() => [
+    ...reports.map(r => ({ kind: 'report', key: r.id, period: r.period, r })),
+    ...missingMonths.map(p => ({ kind: 'missing', key: `missing-${p}`, period: p })),
+  ].sort((a, b) => b.period.localeCompare(a.period)), [reports, missingMonths])
+
   const handleFile = useCallback(file => {
     if (!file) return
     if (!file.name.toLowerCase().endsWith('.eml')) { alert('Please select a .eml file'); return }
@@ -246,6 +344,44 @@ export default function SquareReports({ clientId }) {
     }
     reader.readAsText(file)
   }, [])
+
+  // Saving a report also books its adjustment pairs — the SQUARE FEES gross-up
+  // and the SALES TAX accrual (see monthEnd) — so the P&L and the liability pick
+  // the month up at upload time instead of waiting for month-end close. Matched
+  // by description: a re-upload corrects the amounts rather than duplicating,
+  // and months already booked through the close page are left alone.
+  const syncAdjustments = async ({ period, fees, taxCollected }) => {
+    const round = v => Math.round((Number(v) || 0) * 100) / 100
+    const feeAmt = round(fees), taxAmt = round(taxCollected)
+    if (feeAmt <= 0 && taxAmt <= 0) return null
+    const { accounts } = await fetchSectionMap(clientId)
+    const rows = [
+      ...(feeAmt > 0 ? squareFeeRows(period, feeAmt, accounts) : []),
+      ...(taxAmt > 0 ? taxRows(period, taxAmt, accounts)       : []),
+    ]
+    const { data: existing, error } = await supabase.from('bank_transactions')
+      .select('id, description, amount')
+      .eq('client_id', clientId)
+      .in('description', rows.map(r => r.description))
+    if (error) throw error
+    const byDesc = {}
+    ;(existing ?? []).forEach(t => { (byDesc[t.description] ??= []).push(t) })
+    const inserts = rows.filter(r => !byDesc[r.description]?.length)
+    const updates = rows.flatMap(r => (byDesc[r.description] ?? [])
+      .filter(t => Math.abs(Number(t.amount) - r.amount) >= 0.005)
+      .map(t => ({ id: t.id, amount: r.amount })))
+    if (inserts.length) {
+      const { error: insErr } = await supabase.from('bank_transactions')
+        .insert(inserts.map(r => ({ ...r, account: ADJUSTMENTS_ACCOUNT, client_id: clientId })))
+      if (insErr) throw insErr
+    }
+    for (const u of updates) {
+      const { error: updErr } = await supabase.from('bank_transactions')
+        .update({ amount: u.amount }).eq('client_id', clientId).eq('id', u.id)
+      if (updErr) throw updErr
+    }
+    return inserts.length ? 'booked' : updates.length ? 'corrected' : null
+  }
 
   const save = async () => {
     if (!preview) return
@@ -266,7 +402,14 @@ export default function SquareReports({ clientId }) {
         categories:   preview.categories,
       }, { onConflict: 'client_id,period' })
       if (error) throw error
-      setMsg(`✓ ${fmtPeriod(preview.period)} saved`)
+      let adjNote = ''
+      try {
+        const adj = await syncAdjustments(preview)
+        if (adj) adjNote = ` · adjustments ${adj}`
+      } catch (e) {
+        alert('Report saved, but booking its adjustment entries failed: ' + e.message)
+      }
+      setMsg(`✓ ${fmtPeriod(preview.period)} saved${adjNote}`)
       setPreview(null)
       load()
     } catch (e) { alert('Save failed: ' + e.message) }
@@ -274,10 +417,17 @@ export default function SquareReports({ clientId }) {
   }
 
   const deleteReport = async id => {
-    if (!confirm('Delete this report?')) return
+    const period = reports.find(r => r.id === id)?.period
+    if (!confirm('Delete this report? Its booked fee and sales-tax adjustment entries are removed with it.')) return
     const { error } = await supabase.from('square_reports').delete()
       .eq('client_id', clientId).eq('id', id)
     if (error) { alert('Delete failed: ' + error.message); return }
+    if (period) {
+      const { error: adjErr } = await supabase.from('bank_transactions').delete()
+        .eq('client_id', clientId).eq('account', ADJUSTMENTS_ACCOUNT)
+        .in('description', [...squareFeeRows(period, 0), ...taxRows(period, 0)].map(r => r.description))
+      if (adjErr) alert('Report deleted, but removing its adjustment entries failed: ' + adjErr.message)
+    }
     load()
   }
 
@@ -288,9 +438,10 @@ export default function SquareReports({ clientId }) {
       {/* Header */}
       <header style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', padding: '14px 28px', background: T.card, borderBottom: `1px solid ${T.border}` }}>
         <div>
-          <h2 style={{ fontSize: 14, fontWeight: 600, color: T.navy, margin: '0 0 2px' }}>Square Reports</h2>
+          {headerLeft ?? <h2 style={{ fontSize: 14, fontWeight: 600, color: T.navy, margin: '0 0 2px' }}>Square Reports</h2>}
           <p style={{ fontSize: 11, color: 'rgba(74,74,74,0.65)', margin: 0 }}>
             {reports.length} month{reports.length !== 1 ? 's' : ''} uploaded
+            {missingMonths.length > 0 && <> · <span style={{ color: T.amber, fontWeight: 500 }}>{missingMonths.length} month{missingMonths.length !== 1 ? 's' : ''} missing</span></>}
             {msg && <> · <span style={{ color: T.success, fontWeight: 500 }}>{msg}</span></>}
           </p>
         </div>
@@ -396,6 +547,9 @@ export default function SquareReports({ clientId }) {
           </div>
         )}
 
+        {/* Upload coverage */}
+        {!loading && reports.length > 0 && <CoveragePanel reports={reports} />}
+
         {/* Saved reports */}
         {loading ? (
           <div style={{ textAlign: 'center', padding: '40px 0' }}>
@@ -417,11 +571,27 @@ export default function SquareReports({ clientId }) {
               </tr>
             </thead>
             <tbody>
-              {reports.map((r, i) => {
+              {tableRows.map((row, i) => {
+                const zebra = i % 2 === 0 ? '#fff' : '#f9fafb'
+                if (row.kind === 'missing') return (
+                  <tr key={row.key} style={{ background: zebra, borderBottom: `1px solid ${T.border}` }}>
+                    <td style={{ padding: '8px 4px', textAlign: 'center', width: 28, color: T.amber, fontSize: 11 }}>⚠</td>
+                    <td style={{ padding: '8px 10px', fontSize: 13, fontWeight: 600, color: T.amber }}>{fmtPeriod(row.period)}</td>
+                    <td colSpan={5} style={{ padding: '8px 10px', fontSize: 11.5, color: T.amber }}>
+                      No report uploaded — the revenue gross-up and sales-tax accrual are missing for this month.
+                    </td>
+                    <td style={{ padding: '8px 10px', textAlign: 'center' }}>
+                      <button onClick={() => fileRef.current?.click()} title="Upload this month's Square .eml"
+                        style={{ background: 'none', border: `1px solid ${T.border}`, borderRadius: 4, color: T.charcoal, cursor: 'pointer', fontSize: 10, padding: '2px 8px', whiteSpace: 'nowrap' }}>
+                        ↑ Upload
+                      </button>
+                    </td>
+                  </tr>
+                )
+                const r = row.r
                 const cats = Array.isArray(r.categories) ? r.categories : []
                 const top = [...cats].sort((a, b) => b.amount - a.amount)[0]
                 const isOpen = !!expanded[r.id]
-                const zebra = i % 2 === 0 ? '#fff' : '#f9fafb'
                 const toggle = () => setExpanded(p => ({ ...p, [r.id]: !p[r.id] }))
                 return (
                   <Fragment key={r.id}>

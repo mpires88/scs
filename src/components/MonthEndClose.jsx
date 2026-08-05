@@ -53,7 +53,7 @@ export default function MonthEndClose({ clientId }) {
           fetchAll(() => supabase.from('bank_transactions')
             .select('transaction_date, amount, category, account')
             .eq('client_id', clientId).order('transaction_date').order('id')),
-          supabase.from('square_reports').select('period, gross_sales, tax_collected, categories')
+          supabase.from('square_reports').select('period, gross_sales, tax_collected, fees, categories')
             .eq('client_id', clientId).order('period'),
           fetchSectionMap(clientId).then(r => ({ ...r, error: null })).catch(e => ({ map: {}, error: e })),
           getSetting(clientId, 'cogs_method', null).catch(() => null),
