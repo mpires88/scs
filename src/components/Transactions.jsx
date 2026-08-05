@@ -52,7 +52,9 @@ function mixedTitle(g, catOf) {
 
 // `headerLeft` lets the combined Transactions hub put its title and tab
 // switcher where the standalone title sits; the live stats line stays.
-export default function Transactions({ clientId = null, headerLeft = null }) {
+// `initialFilters` comes from the URL when a report figure links here, so the
+// page opens already showing the transactions behind that number.
+export default function Transactions({ clientId = null, headerLeft = null, initialFilters = null }) {
   const [txns,        setTxns]        = useState([])
   const [loading,     setLoading]     = useState(true)
   const [loadError,   setLoadError]   = useState(null)
@@ -61,11 +63,14 @@ export default function Transactions({ clientId = null, headerLeft = null }) {
   const [rejected,    setRejected]    = useState(new Set()) // txn IDs whose suggestion was dismissed
   const [separated,   setSeparated]   = useState(new Set()) // txn IDs given their own group
   const [fuzzy,       setFuzzy]       = useState(true)
-  const [search,      setSearch]      = useState('')
+  const [search,      setSearch]      = useState(initialFilters?.q || '')
+  // Exact category names from a deep link. Unlike `search` this is not fuzzy —
+  // it has to reproduce the figure that was clicked, not merely resemble it.
+  const [catFilter,   setCatFilter]   = useState(initialFilters?.cats ?? [])
   const [filter,      setFilter]      = useState('all')
-  const [view,        setView]        = useState('grouped')  // 'grouped' | 'flat'
-  const [dateFrom,    setDateFrom]    = useState('')
-  const [dateTo,      setDateTo]      = useState('')
+  const [view,        setView]        = useState(initialFilters?.view || 'grouped')  // 'grouped' | 'flat'
+  const [dateFrom,    setDateFrom]    = useState(initialFilters?.from || '')
+  const [dateTo,      setDateTo]      = useState(initialFilters?.to || '')
   const [acctFilter,  setAcctFilter]  = useState('')      // '' = all accounts
   const [registry,    setRegistry]    = useState([])      // client_settings 'ledger_accounts'
   const [sortGrouped, setSortGrouped] = useState({ col: 'description', dir: 'asc'  })
@@ -218,16 +223,22 @@ export default function Transactions({ clientId = null, headerLeft = null }) {
   // ISO date strings compare lexicographically, which is also chronological.
   const dateActive = !!(dateFrom || dateTo)
   const acctActive = !!acctFilter
+  const catActive  = catFilter.length > 0
+  // Matches the SAVED category, not the effective one: a deep link reproduces a
+  // figure built from saved data, and filtering on pending edits would make
+  // rows vanish from under you as you recategorize them.
+  const catSet = useMemo(() => new Set(catFilter), [catFilter])
   const dateFiltered = useMemo(() => {
-    if (!dateFrom && !dateTo && !acctFilter) return txns
+    if (!dateFrom && !dateTo && !acctFilter && !catSet.size) return txns
     return txns.filter(t => {
       const d = t.transaction_date || ''
       if (dateFrom && d < dateFrom) return false
       if (dateTo   && d > dateTo)   return false
       if (acctFilter && acctNameOf(t) !== acctFilter) return false
+      if (catSet.size && !catSet.has((t.category || '').trim())) return false
       return true
     })
-  }, [txns, dateFrom, dateTo, acctFilter, acctNameOf])
+  }, [txns, dateFrom, dateTo, acctFilter, acctNameOf, catSet])
 
   const groups = useMemo(() => {
     // Suggestion index is built from the full history, not the date window —
@@ -337,7 +348,7 @@ export default function Transactions({ clientId = null, headerLeft = null }) {
   // Selection is keyed by group key in grouped view and by transaction id in
   // flat view, so it must not survive anything that regroups or switches view;
   // it deliberately does survive page changes.
-  useEffect(() => { setPage(0); setSelected(new Set()) }, [search, filter, fuzzy, view, dateFrom, dateTo, acctFilter])
+  useEffect(() => { setPage(0); setSelected(new Set()) }, [search, filter, fuzzy, view, dateFrom, dateTo, acctFilter, catFilter])
   useEffect(() => { setPage(0) }, [sortGrouped, sortFlat])
 
   const visibleGroups = useMemo(() => {
@@ -648,9 +659,9 @@ export default function Transactions({ clientId = null, headerLeft = null }) {
           <p style={s.sub}>
             {!isFlat && <>{groups.length} merchant groups · </>}
             {dateFiltered.length} transaction{dateFiltered.length !== 1 ? 's' : ''}
-            {(dateActive || acctActive) && (
+            {(dateActive || acctActive || catActive) && (
               <> <span style={{ color: T.navy, fontWeight: 500 }}>
-                {[acctActive && acctFilter, dateActive && 'in range'].filter(Boolean).join(' · ')}
+                {[acctActive && acctFilter, catActive && `${catFilter.length} categor${catFilter.length !== 1 ? 'ies' : 'y'}`, dateActive && 'in range'].filter(Boolean).join(' · ')}
               </span> of {txns.length}</>
             )}
             {loadingMore && <> · <span style={{ color: T.charcoal, opacity: .6 }}>loading more…</span></>}
@@ -681,6 +692,20 @@ export default function Transactions({ clientId = null, headerLeft = null }) {
           </button>
         </div>
       </header>
+      {catActive && (
+        <div style={{ display:'flex', alignItems:'center', gap:10, flexWrap:'wrap', padding:'7px 28px', background:'#EBF1F7', borderBottom:`1px solid ${T.border}`, fontSize:11.5, color:T.navy }}>
+          <span>
+            Showing <strong>{catFilter.join(', ')}</strong>
+            {dateActive && <> from <strong>{dateFrom || 'the start'}</strong> to <strong>{dateTo || 'now'}</strong></>}
+            {' '}— linked from a report.
+          </span>
+          <button
+            onClick={() => { setCatFilter([]); setDateFrom(''); setDateTo('') }}
+            style={{ padding:'2px 10px', fontSize:11, borderRadius:5, cursor:'pointer', border:`1px solid ${T.border}`, background:'#fff', color:T.charcoal }}
+          >Clear filter</button>
+        </div>
+      )}
+
 
       <div style={s.content}>
       {/* Upload coverage */}

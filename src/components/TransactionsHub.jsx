@@ -19,7 +19,7 @@ const TABS = [
   { key: 'square',     label: 'Square Reports', hint: 'Monthly Square sales report emails' },
 ]
 
-export default function TransactionsHub({ clientId, defaultTab = 'categorize' }) {
+export default function TransactionsHub({ clientId, defaultTab = 'categorize', initialFilters = null }) {
   const [tab, setTab] = useState(defaultTab)
   const [seen, setSeen] = useState({ [defaultTab]: true })
 
@@ -52,7 +52,7 @@ export default function TransactionsHub({ clientId, defaultTab = 'categorize' })
     <>
       {seen.categorize && (
         <div style={{ display: tab === 'categorize' ? 'block' : 'none', height: '100%' }}>
-          <Transactions clientId={clientId} headerLeft={headerLeft} />
+          <Transactions clientId={clientId} headerLeft={headerLeft} initialFilters={initialFilters} />
         </div>
       )}
       {seen.square && (

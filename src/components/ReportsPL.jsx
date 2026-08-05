@@ -2,6 +2,8 @@ import { useState, useEffect, useMemo, Fragment } from 'react'
 import { supabase, fetchAll } from '../lib/supabase'
 import { PL_SECTIONS, fetchAccounts } from '../lib/chartOfAccounts'
 import { groupRowsByParent } from '../lib/plGrouping'
+import Link from 'next/link'
+import { buildTxnLink, columnRange } from '../lib/txnLink'
 import { T, MON, fmtYm, STMT } from '../lib/theme'
 
 // Expense-like sections are displayed as positive "money spent" numbers.
@@ -270,6 +272,8 @@ export default function ReportsPL({ clientId, headerLeft = null, shared = null, 
 
   // ── Render ─────────────────────────────────────────────────────────────────
 
+  const linkCtx = { year, yearly: !!statement?.yearly, columns: statement?.months ?? [] }
+
   if (loading) return (
     <div style={{ display:'flex', alignItems:'center', justifyContent:'center', minHeight:300, background:T.page }}>
       <style>{`@keyframes spin { to { transform: rotate(360deg) } }`}</style>
@@ -377,7 +381,7 @@ export default function ReportsPL({ clientId, headerLeft = null, shared = null, 
                   return (
                     <Fragment key={sec.section}>
                       {sec.entries.length > 0 && (
-                        <SectionRows sec={sec} sign={sign} months={statement.months} />
+                        <SectionRows sec={sec} sign={sign} months={statement.months} ctx={linkCtx} />
                       )}
                       {computedAfter && (
                         <ComputedRow label={computedAfter[0]} data={computedAfter[1]} months={statement.months} />
@@ -414,8 +418,33 @@ export default function ReportsPL({ clientId, headerLeft = null, shared = null, 
   )
 }
 
+// A figure that opens the transactions behind it. Only non-zero numbers link —
+// a dash has nothing to show — and `cats` carries the exact account names so the
+// destination reproduces this figure rather than merely resembling it.
+function Amount({ value, cats, column, ctx, style }) {
+  const shown = fmtCell(value)
+  if (shown === '—' || !cats?.length) return <td style={style}>{shown}</td>
+  const { from, to } = columnRange(column, ctx)
+  return (
+    <td style={style}>
+      <Link
+        href={buildTxnLink({ cats, from, to })}
+        title={`Show the ${cats.length === 1 ? cats[0] : `${cats.length} accounts`} transactions behind this`}
+        style={linkStyle}
+      >{shown}</Link>
+    </td>
+  )
+}
+
+const linkStyle = {
+  color: 'inherit', textDecoration: 'underline', textDecorationStyle: 'dotted',
+  textDecorationColor: T.border, textUnderlineOffset: 2,
+}
+
 // One P&L section: header, account rows, subtotal.
-function SectionRows({ sec, sign, months }) {
+function SectionRows({ sec, sign, months, ctx }) {
+  // A subtotal is made of its rows, so it links to exactly those accounts.
+  const secCats = sec.rows.map(r => r.name)
   return (
     <>
       <tr>
@@ -424,7 +453,7 @@ function SectionRows({ sec, sign, months }) {
         </td>
       </tr>
       {sec.entries.map(en => {
-        const rowProps = { sign, months }
+        const rowProps = { sign, months, ctx }
         if (en.kind === 'row') return <AccountRow key={en.name} r={en} {...rowProps} />
         return (
           <Fragment key={en.name}>
@@ -436,13 +465,20 @@ function SectionRows({ sec, sign, months }) {
             </tr>
             {en.children.map(r => <AccountRow key={r.name} r={r} indent {...rowProps} />)}
             {en.own && <AccountRow key={`${en.name} (other)`} r={en.own} label={`${en.name} (other)`} indent {...rowProps} />}
-            <tr style={{ borderBottom:`1px solid #F0EEE9` }}>
-              <td style={{ ...cell.td, paddingLeft:16, fontWeight:600, color:T.navy, position:'sticky', left:0, background:T.card }}>Total {en.name}</td>
-              {months.map(m => (
-                <td key={m} style={{ ...cell.num, fontWeight:600 }}>{fmtCell((en.totals[m] ?? 0) * sign)}</td>
-              ))}
-              <td style={{ ...cell.num, borderLeft:`2px solid ${T.border}`, fontWeight:700 }}>{fmtCell(en.total * sign)}</td>
-            </tr>
+            {(() => {
+              const groupCats = [...en.children.map(r => r.name), ...(en.own ? [en.own.name] : [])]
+              return (
+                <tr style={{ borderBottom:`1px solid #F0EEE9` }}>
+                  <td style={{ ...cell.td, paddingLeft:16, fontWeight:600, color:T.navy, position:'sticky', left:0, background:T.card }}>Total {en.name}</td>
+                  {months.map(m => (
+                    <Amount key={m} value={(en.totals[m] ?? 0) * sign} cats={groupCats} column={m} ctx={ctx}
+                      style={{ ...cell.num, fontWeight:600 }} />
+                  ))}
+                  <Amount value={en.total * sign} cats={groupCats} column={null} ctx={ctx}
+                    style={{ ...cell.num, borderLeft:`2px solid ${T.border}`, fontWeight:700 }} />
+                </tr>
+              )
+            })()}
           </Fragment>
         )
       })}
@@ -450,23 +486,27 @@ function SectionRows({ sec, sign, months }) {
       <tr style={{ background:T.page, borderBottom:`1px solid ${T.border}` }}>
         <td style={{ ...cell.td, fontWeight:600, color:T.navy, position:'sticky', left:0, background:T.page }}>Total {sec.section}</td>
         {months.map(m => (
-          <td key={m} style={{ ...cell.num, fontWeight:600, color:T.navy }}>{fmtCell(sec.totals[m] * sign)}</td>
+          <Amount key={m} value={sec.totals[m] * sign} cats={secCats} column={m} ctx={ctx}
+            style={{ ...cell.num, fontWeight:600, color:T.navy }} />
         ))}
-        <td style={{ ...cell.num, borderLeft:`2px solid ${T.border}`, fontWeight:700, color:T.navy }}>{fmtCell(sec.total * sign)}</td>
+        <Amount value={sec.total * sign} cats={secCats} column={null} ctx={ctx}
+          style={{ ...cell.num, borderLeft:`2px solid ${T.border}`, fontWeight:700, color:T.navy }} />
       </tr>
     </>
   )
 }
 
 // One account line. `indent` marks a sub-account row nested under a parent.
-function AccountRow({ r, label, indent = false, sign, months }) {
+function AccountRow({ r, label, indent = false, sign, months, ctx }) {
+  const cats = [r.name]
   return (
     <tr style={{ borderBottom:`1px solid #F0EEE9` }}>
       <td title={label ?? r.name} style={{ ...cell.td, paddingLeft: indent ? 26 : 16, position:'sticky', left:0, background:T.card }}>{label ?? r.name}</td>
       {months.map(m => (
-        <td key={m} style={cell.num}>{fmtCell((r.byMonth[m] ?? 0) * sign)}</td>
+        <Amount key={m} value={(r.byMonth[m] ?? 0) * sign} cats={cats} column={m} ctx={ctx} style={cell.num} />
       ))}
-      <td style={{ ...cell.num, borderLeft:`2px solid ${T.border}`, fontWeight:600 }}>{fmtCell(r.total * sign)}</td>
+      <Amount value={r.total * sign} cats={cats} column={null} ctx={ctx}
+        style={{ ...cell.num, borderLeft:`2px solid ${T.border}`, fontWeight:600 }} />
     </tr>
   )
 }
