@@ -2,7 +2,7 @@ import { useState, useEffect, useCallback, useMemo, useRef, Fragment } from 'rea
 import { supabase, fetchAll } from '../lib/supabase'
 import { fetchSectionMap } from '../lib/chartOfAccounts'
 import { ADJUSTMENTS_ACCOUNT, computeSquareReconciliation } from '../lib/insights'
-import { squareFeeRows, taxRows } from '../lib/monthEnd'
+import { squareFeeRows, taxRows, discountRows } from '../lib/monthEnd'
 import { T, fmt2 as fmt, fmtPeriod } from '../lib/theme'
 
 // ─── Quoted-printable decoder (handles multi-byte UTF-8) ──────────────────────
@@ -454,19 +454,23 @@ export default function SquareReports({ clientId, headerLeft = null }) {
     reader.readAsText(file)
   }, [])
 
-  // Saving a report also books its adjustment pairs — the SQUARE FEES gross-up
-  // and the SALES TAX accrual (see monthEnd) — so the P&L and the liability pick
-  // the month up at upload time instead of waiting for month-end close. Matched
-  // by description: a re-upload corrects the amounts rather than duplicating,
-  // and months already booked through the close page are left alone.
-  const syncAdjustments = async ({ period, fees, taxCollected }) => {
+  // Saving a report also books its adjustment pairs — the SQUARE FEES gross-up,
+  // the SALES TAX accrual and the SQUARE DISCOUNTS gross-up (see monthEnd) — so
+  // the P&L and the liability pick the month up at upload time instead of
+  // waiting for month-end close. Matched by description: a re-upload corrects
+  // the amounts rather than duplicating, and months already booked through the
+  // close page are left alone. Square reports discounts as a negative, so the
+  // magnitude is booked.
+  const syncAdjustments = async ({ period, fees, taxCollected, discounts }) => {
     const round = v => Math.round((Number(v) || 0) * 100) / 100
     const feeAmt = round(fees), taxAmt = round(taxCollected)
-    if (feeAmt <= 0 && taxAmt <= 0) return null
+    const discAmt = round(Math.abs(Number(discounts) || 0))
+    if (feeAmt <= 0 && taxAmt <= 0 && discAmt <= 0) return null
     const { accounts } = await fetchSectionMap(clientId)
     const rows = [
-      ...(feeAmt > 0 ? squareFeeRows(period, feeAmt, accounts) : []),
-      ...(taxAmt > 0 ? taxRows(period, taxAmt, accounts)       : []),
+      ...(feeAmt > 0 ? squareFeeRows(period, feeAmt, accounts)   : []),
+      ...(taxAmt > 0 ? taxRows(period, taxAmt, accounts)         : []),
+      ...(discAmt > 0 ? discountRows(period, discAmt, accounts)  : []),
     ]
     const { data: existing, error } = await supabase.from('bank_transactions')
       .select('id, description, amount')
@@ -527,14 +531,14 @@ export default function SquareReports({ clientId, headerLeft = null }) {
 
   const deleteReport = async id => {
     const period = reports.find(r => r.id === id)?.period
-    if (!confirm('Delete this report? Its booked fee and sales-tax adjustment entries are removed with it.')) return
+    if (!confirm('Delete this report? Its booked adjustment entries (fees, sales tax, discounts) are removed with it.')) return
     const { error } = await supabase.from('square_reports').delete()
       .eq('client_id', clientId).eq('id', id)
     if (error) { alert('Delete failed: ' + error.message); return }
     if (period) {
       const { error: adjErr } = await supabase.from('bank_transactions').delete()
         .eq('client_id', clientId).eq('account', ADJUSTMENTS_ACCOUNT)
-        .in('description', [...squareFeeRows(period, 0), ...taxRows(period, 0)].map(r => r.description))
+        .in('description', [...squareFeeRows(period, 0), ...taxRows(period, 0), ...discountRows(period, 0)].map(r => r.description))
       if (adjErr) alert('Report deleted, but removing its adjustment entries failed: ' + adjErr.message)
     }
     load()

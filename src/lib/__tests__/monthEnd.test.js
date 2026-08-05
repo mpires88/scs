@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest'
-import { cogsRows, taxRows, buildMonthEndRows, trueUpRows, quarterLabel, squareFeeRows } from '../monthEnd'
+import { cogsRows, taxRows, buildMonthEndRows, trueUpRows, quarterLabel, squareFeeRows, discountRows } from '../monthEnd'
 
 describe('role resolution against a renamed chart', () => {
   const accounts = [
@@ -145,5 +145,31 @@ describe('squareFeeRows / buildMonthEndRows fee leg', () => {
     expect(buildMonthEndRows({ ...base, feeProposal: { amount: 0, booked: false } })).toEqual([])
     expect(buildMonthEndRows({ ...base, feeProposal: null })).toEqual([])
     expect(buildMonthEndRows({ ...base, feeProposal: { amount: 500, booked: false } })).toHaveLength(2)
+  })
+})
+
+// ─── Square discount gross-up ─────────────────────────────────────────────────
+
+describe('discountRows', () => {
+  const ACCOUNTS = [
+    { name: '1100 Square Deposits', pl_section: 'Revenue' },
+    { name: '2200 Discounts',       pl_section: 'Deductions to Income' },
+  ]
+
+  it('books the giveaway as a deduction and grosses revenue up, netting zero', () => {
+    const rows = discountRows('2026-06', 45.5, ACCOUNTS)
+    expect(rows).toHaveLength(2)
+    expect(rows.reduce((s, r) => s + r.amount, 0)).toBeCloseTo(0, 6)
+    expect(rows[0]).toMatchObject({
+      transaction_date: '2026-06-30', amount: -45.5, category: '2200 Discounts',
+    })
+    expect(rows[1]).toMatchObject({
+      transaction_date: '2026-06-30', amount: 45.5, category: '1100 Square Deposits',
+    })
+  })
+
+  it('resolves roles against the chart, falling back to plain names', () => {
+    expect(discountRows('2026-06', 10, ACCOUNTS)[0].category).toBe('2200 Discounts')
+    expect(discountRows('2026-06', 10, [])[0].category).toBe('Discounts')
   })
 })

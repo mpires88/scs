@@ -42,6 +42,17 @@ export function squareFeeRows(month, amount, accounts = []) {
   ]
 }
 
+// Discounts & comps never reach the bank: Square nets them out before anything
+// is deposited. Booking them shows what was given away — revenue grosses up to
+// the pre-discount price and the giveaway becomes a visible deduction line.
+export function discountRows(month, amount, accounts = []) {
+  const date = lastDayOfMonth(month)
+  return [
+    { transaction_date: date, description: `SQUARE DISCOUNTS — ${month}`,         amount: -amount, category: resolveRoleName(accounts, 'Discounts') },
+    { transaction_date: date, description: `SQUARE DISCOUNT GROSS-UP — ${month}`, amount:  amount, category: resolveRoleName(accounts, 'Square Deposits') },
+  ]
+}
+
 // Everything still pending for a month. Already-booked legs are skipped, so
 // calling this twice for the same month yields an empty array the second time.
 export function buildMonthEndRows({ month, cogsProposal, taxProposal, feeProposal, cogsBooked = false, accounts = [] }) {
