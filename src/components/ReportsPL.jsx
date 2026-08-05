@@ -3,7 +3,7 @@ import { supabase, fetchAll } from '../lib/supabase'
 import { PL_SECTIONS, fetchAccounts } from '../lib/chartOfAccounts'
 import { groupRowsByParent } from '../lib/plGrouping'
 import { getSetting, setSetting } from '../lib/settings'
-import { T, MON } from '../lib/theme'
+import { T, MON, fmtYm, STMT } from '../lib/theme'
 
 // Expense-like sections are displayed as positive "money spent" numbers.
 const EXPENSE_SECTIONS = new Set(['Deductions to Income', 'Cost of Goods Sold', 'Operating Expenses', 'Non-Operating Expenses'])
@@ -15,22 +15,46 @@ const fmtCell = n => {
   return neg ? `(${str})` : str
 }
 
-export default function ReportsPL({ clientId }) {
-  const [txns,       setTxns]       = useState([])
-  const [accounts,   setAccounts]   = useState([])
-  const [budgets,    setBudgets]    = useState({})     // account → monthly budget
-  const [loading,    setLoading]    = useState(true)
+// `headerLeft` lets the combined Financial Statements page put its own title and
+// tab switcher where the standalone title sits, so the two share one header
+// bar instead of stacking a page header above a statement header.
+// `shared` lets the combined page drive year / period / hide-zero across all
+// three statements at once — those controls hide here when it does. `data` lets
+// it read the ledger once and hand it down instead of each statement fetching
+// the same rows again.
+export default function ReportsPL({ clientId, headerLeft = null, shared = null, data = null, csvSink = null }) {
+  const [txnsLocal,     setTxns]     = useState([])
+  const [accountsLocal, setAccounts] = useState([])
+  const [budgets,       setBudgets]  = useState({})     // account → monthly budget
+  const [loadingLocal,  setLoading]  = useState(true)
   const [error,      setError]      = useState(null)
-  const [year,       setYear]       = useState(null)
-  const [showBudget, setShowBudget] = useState(false)
-  const [showAll,    setShowAll]    = useState(true)
-  const [hideZero,   setHideZero]   = useState(false)
-  const [period,     setPeriod]     = useState('monthly')  // 'monthly' | 'yearly'
+  // Injected data is read straight through rather than copied into state —
+  // one source of truth, and no state writes during render.
+  // The P&L works off categorized rows; the shared ledger carries everything.
+  const txns     = useMemo(
+    () => (data ? data.txns.filter(t => (t.category || '').trim()) : txnsLocal),
+    [data, txnsLocal])
+  const accounts = data ? data.accounts : accountsLocal
+  const loading  = data ? false         : loadingLocal
+  const [yearLocal,     setYear]       = useState(null)
+  const [showBudget,    setShowBudget] = useState(false)
+  const [showAll,       setShowAll]    = useState(true)
+  const [hideZeroLocal, setHideZero]   = useState(false)
+  const [periodLocal,   setPeriod]     = useState('monthly')  // 'monthly' | 'yearly'
+  const year     = shared ? shared.year     : yearLocal
+  const hideZero = shared ? shared.hideZero : hideZeroLocal
+  const period   = shared ? shared.period   : periodLocal
   const [drafts,     setDrafts]     = useState({})
 
   useEffect(() => {
     let cancelled = false
     ;(async () => {
+      // Budgets are a small settings read, needed on both paths.
+      if (data) {
+        const v = await getSetting(clientId, 'budgets', {}).catch(() => ({}))
+        if (!cancelled) setBudgets(v || {})
+        return
+      }
       setLoading(true); setError(null)
       try {
         const [rows, coa, budgetVal] = await Promise.all([
@@ -53,7 +77,7 @@ export default function ReportsPL({ clientId }) {
       if (!cancelled) setLoading(false)
     })()
     return () => { cancelled = true }
-  }, [clientId])
+  }, [clientId, data])
 
   const years = useMemo(
     () => [...new Set(txns.map(t => +(t.transaction_date || '').slice(0, 4)).filter(Boolean))].sort(),
@@ -75,12 +99,16 @@ export default function ReportsPL({ clientId }) {
     // `months` carries the column keys either way so the rest of the build —
     // section totals, computed lines, grouping — is identical in both modes.
     const yearly = period === 'yearly'
-    const inScope = t => yearly || (t.transaction_date || '').startsWith(String(year))
+    const allDates = period === 'all'   // every month of every year, side by side
+    const inScope = t => yearly || allDates || (t.transaction_date || '').startsWith(String(year))
     const colOf = t => yearly
       ? +(t.transaction_date || '').slice(0, 4)
-      : +(t.transaction_date || '').slice(5, 7)
+      : allDates
+        ? (t.transaction_date || '').slice(0, 7)
+        : +(t.transaction_date || '').slice(5, 7)
 
-    const active = [...new Set(txns.filter(inScope).map(colOf).filter(Boolean))].sort((a, b) => a - b)
+    const active = [...new Set(txns.filter(inScope).map(colOf).filter(Boolean))]
+      .sort((a, b) => String(a).localeCompare(String(b), undefined, { numeric: true }))
     if (!active.length) return null
 
     // A year's statement should read as a year: in monthly mode the columns
@@ -88,9 +116,22 @@ export default function ReportsPL({ clientId }) {
     // years line up with one another and a closed month shows an explicit dash
     // instead of silently not existing. It stops at the last month with
     // activity — months that haven't happened yet would be noise, not absence.
+    const ymRange = (first, last) => {
+      const out = []
+      let [y, m] = String(first).split('-').map(Number)
+      for (let ym = first; ym <= last;) {
+        out.push(ym)
+        m += 1
+        if (m > 12) { m = 1; y += 1 }
+        ym = `${y}-${String(m).padStart(2, '0')}`
+      }
+      return out
+    }
     const months = yearly
       ? active
-      : Array.from({ length: active[active.length - 1] }, (_, i) => i + 1)
+      : allDates
+        ? ymRange(active[0], active[active.length - 1])
+        : Array.from({ length: active[active.length - 1] }, (_, i) => i + 1)
 
     // account → { [column]: sum }
     const acctMonth = {}
@@ -179,7 +220,7 @@ export default function ReportsPL({ clientId }) {
 
     // Budget variance divides by the columns that actually traded, not the
     // padded ones — averaging a closed month in would understate every account.
-    return { year, months, activeCount: active.length, sections, computed, yearly }
+    return { year, months, activeCount: active.length, sections, computed, yearly, allDates }
   }, [txns, sectionMap, accounts, year, showAll, hideZero, period])
 
   // ── Budget helpers ─────────────────────────────────────────────────────────
@@ -195,10 +236,10 @@ export default function ReportsPL({ clientId }) {
 
   // ── Export ─────────────────────────────────────────────────────────────────
 
-  const exportCSV = () => {
-    if (!statement) return
+  const buildCsvLines = () => {
+    if (!statement) return null
     const { months, sections, computed } = statement
-    const head = ['Account', ...months.map(m => statement.yearly ? String(m) : `${MON[m]} ${year}`), 'Total']
+    const head = ['Account', ...months.map(m => statement.yearly ? String(m) : statement.allDates ? fmtYm(m) : `${MON[m]} ${year}`), 'Total']
     const lines = [head]
     const displaySign = section => EXPENSE_SECTIONS.has(section) ? -1 : 1
 
@@ -227,7 +268,18 @@ export default function ReportsPL({ clientId }) {
         lines.push(['OPERATING INCOME', ...months.map(m => computed.opIncome.byMonth[m].toFixed(2)), computed.opIncome.total.toFixed(2)])
     })
     lines.push(['NET INCOME', ...months.map(m => computed.netIncome.byMonth[m].toFixed(2)), computed.netIncome.total.toFixed(2)])
+    return lines
+  }
 
+  // The combined Financial Statements page pulls lines through this sink so its
+  // Export picker can bundle several statements into one file. Registered every
+  // render so the closure always sees current data.
+  // eslint-disable-next-line react-hooks/immutability -- csvSink is a ref; mutating .current is its contract
+  useEffect(() => { if (csvSink) csvSink.current.pl = buildCsvLines })
+
+  const exportCSV = () => {
+    const lines = buildCsvLines()
+    if (!lines) return
     const csv = lines.map(row => row.map(cell => `"${String(cell).replace(/"/g, '""')}"`).join(',')).join('\r\n')
     const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' })
     const url = URL.createObjectURL(blob)
@@ -268,13 +320,15 @@ export default function ReportsPL({ clientId }) {
         }
       `}</style>
 
-      <header style={{ display:'flex', justifyContent:'space-between', alignItems:'flex-start', padding:'14px 28px', background:T.card, borderBottom:`1px solid ${T.border}`, flexWrap:'wrap', gap:10 }}>
-        <div>
-          <h2 style={{ fontSize:14, fontWeight:600, color:T.navy, margin:'0 0 2px' }}>Profit &amp; Loss Statement</h2>
-          <p style={{ fontSize:11, color:'rgba(74,74,74,0.65)', margin:0 }}>
-            Sports Card Station {statement?.yearly ? '· all years' : (year ? `· ${year}` : '')} · built from categorized bank transactions
-          </p>
-        </div>
+      <header style={{ display:'flex', justifyContent:'space-between', alignItems:'flex-start', padding:'8px 28px', background:T.card, borderBottom:`1px solid ${T.border}`, flexWrap:'wrap', gap:10 }}>
+        {headerLeft ?? (
+          <div>
+            <h2 style={{ fontSize:12, fontWeight:600, color:T.navy, margin:'0 0 1px' }}>Profit &amp; Loss Statement</h2>
+            <p style={{ fontSize:11, color:'rgba(74,74,74,0.65)', margin:0 }}>
+              Sports Card Station {statement?.yearly ? '· all years' : (year ? `· ${year}` : '')} · built from categorized bank transactions
+            </p>
+          </div>
+        )}
         <div className="pl-controls" style={{ display:'flex', gap:8, alignItems:'center', flexWrap:'wrap' }}>
           <label
             style={{ display:'flex', alignItems:'center', gap:6, fontSize:11, color:T.charcoal, cursor:'pointer', userSelect:'none' }}
@@ -283,6 +337,7 @@ export default function ReportsPL({ clientId }) {
             <input type="checkbox" checked={showAll} onChange={e => setShowAll(e.target.checked)} />
             All accounts
           </label>
+          {!shared && (<>
           <label
             style={{ display:'flex', alignItems:'center', gap:6, fontSize:11, color:T.charcoal, cursor:'pointer', userSelect:'none' }}
             title="Hide any account line that is zero in every column. Section and computed totals are unchanged."
@@ -290,6 +345,7 @@ export default function ReportsPL({ clientId }) {
             <input type="checkbox" checked={hideZero} onChange={e => setHideZero(e.target.checked)} />
             Hide $0 rows
           </label>
+          </>)}
           <label
             style={{ display:'flex', alignItems:'center', gap:6, fontSize:11, color: statement?.yearly ? '#b6b2a8' : T.charcoal, cursor: statement?.yearly ? 'not-allowed' : 'pointer', userSelect:'none' }}
             title={statement?.yearly
@@ -300,6 +356,7 @@ export default function ReportsPL({ clientId }) {
               onChange={e => setShowBudget(e.target.checked)} />
             Budget vs. actual
           </label>
+          {!shared && (<>
           <select
             style={{ fontSize:11, padding:'4px 8px', border:`1px solid ${T.border}`, borderRadius:5, color:T.charcoal, background:'#fff', outline:'none' }}
             value={period} onChange={e => setPeriod(e.target.value)}
@@ -308,15 +365,16 @@ export default function ReportsPL({ clientId }) {
             <option value="monthly">Monthly</option>
             <option value="yearly">Yearly — all years</option>
           </select>
+          </>)}
           <button style={btn.sec} onClick={exportCSV} disabled={!statement}>↓ Export CSV</button>
-          <button style={btn.sec} onClick={() => window.print()} disabled={!statement}>🖨 Print / PDF</button>
+          {!shared && <button style={btn.sec} onClick={() => window.print()} disabled={!statement}>🖨 Print / PDF</button>}
         </div>
       </header>
 
       <div style={{ padding:'20px 28px' }}>
 
         {/* Year tabs */}
-        {years.length > 1 && !statement?.yearly && (
+        {!shared && years.length > 1 && !statement?.yearly && (
           <div className="pl-controls" style={{ display:'flex', gap:4, marginBottom:16 }}>
             {years.map(y => (
               <button key={y} onClick={() => setYear(y)}
@@ -343,13 +401,13 @@ export default function ReportsPL({ clientId }) {
             <table style={{ borderCollapse:'collapse', width:'auto', fontSize:11.5 }}>
               <thead>
                 <tr>
-                  <th style={{ ...cell.th, textAlign:'left', minWidth:150, position:'sticky', left:0, background:T.page, zIndex:1 }}>Account</th>
+                  <th style={{ ...cell.th, textAlign:'left', width:STMT.label, minWidth:STMT.label, maxWidth:STMT.label, position:'sticky', left:0, background:T.page, zIndex:1 }}>Account</th>
                   {statement.months.map(m => (
-                    <th key={m} style={{ ...cell.th, textAlign:'right', minWidth: statement.yearly ? 62 : 50 }}>
-                      {statement.yearly ? m : MON[m]}
+                    <th key={m} style={{ ...cell.th, textAlign:'right', width: statement.yearly ? STMT.numWide : STMT.num, minWidth: statement.yearly ? STMT.numWide : STMT.num }}>
+                      {statement.yearly ? m : statement.allDates ? fmtYm(m) : MON[m]}
                     </th>
                   ))}
-                  <th style={{ ...cell.th, textAlign:'right', minWidth:62, borderLeft:`2px solid ${T.border}` }}>Total</th>
+                  <th style={{ ...cell.th, textAlign:'right', width:STMT.total, minWidth:STMT.total, borderLeft:`2px solid ${T.border}` }}>Total</th>
                   {budgetOn && <>
                     <th style={{ ...cell.th, textAlign:'right', minWidth:64, borderLeft:`2px solid ${T.border}` }}>Budget/mo</th>
                     <th style={{ ...cell.th, textAlign:'right', minWidth:72 }}>Avg vs Budget</th>
@@ -472,7 +530,7 @@ function AccountRow({ r, label, indent = false, sign, months, monthCount, showBu
   const draft = drafts[r.name]
   return (
     <tr style={{ borderBottom:`1px solid #F0EEE9` }}>
-      <td style={{ ...cell.td, paddingLeft: indent ? 26 : 16, position:'sticky', left:0, background:T.card }}>{label ?? r.name}</td>
+      <td title={label ?? r.name} style={{ ...cell.td, paddingLeft: indent ? 26 : 16, position:'sticky', left:0, background:T.card }}>{label ?? r.name}</td>
       {months.map(m => (
         <td key={m} style={cell.num}>{fmtCell((r.byMonth[m] ?? 0) * sign)}</td>
       ))}
@@ -520,7 +578,7 @@ function ComputedRow({ label, data, months, showBudget }) {
 
 const cell = {
   th:  { padding:'6px 8px', background:T.page, fontSize:9.5, fontWeight:700, color:T.gold, textTransform:'uppercase', letterSpacing:'.06em', whiteSpace:'nowrap', borderBottom:`2px solid ${T.border}` },
-  td:  { padding:'3px 8px', fontSize:11.5, color:T.charcoal, whiteSpace:'nowrap' },
+  td:  { padding:'3px 8px', fontSize:11.5, color:T.charcoal, whiteSpace:'nowrap', maxWidth:STMT.label, overflow:'hidden', textOverflow:'ellipsis' },
   num: { padding:'3px 8px', fontSize:11.5, color:T.charcoal, textAlign:'right', fontVariantNumeric:'tabular-nums', whiteSpace:'nowrap' },
 }
 

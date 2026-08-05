@@ -158,6 +158,37 @@ export function BooksGuideContent({ noCogs = false }) {
           )}
 
           {/* ── Number sources ── */}
+          {/* ── The three statements ── */}
+          <Section title="The three statements, and when to read each">
+            <dl style={g.dl}>
+              {[
+                ['Profit & Loss', `Did the shop make money over a stretch of time? Sales (with the state's
+                  sales-tax cut already out), minus what the product cost you, minus the cost of keeping
+                  the doors open. On this shop's margins roughly 83¢ of each sales dollar goes back into
+                  product, so a big month isn't automatically a good month — watch Gross Profit for
+                  whether the markup held.`],
+                ['Balance Sheet', `A snapshot of a single day: what the shop owns (money in the bank,
+                  product on the shelf), what it owes (sales tax collected but not yet sent, the credit
+                  card), and your stake — everything left after the owing. When the P&L says you made
+                  money but the bank looks thin, this shows where the profit went: usually onto the
+                  shelf. Owns minus owes equals your stake, to the penny.`],
+                ['Cash Flow', `Only money that actually moved through the bank — product buys, bills,
+                  card payments, your draws. No estimates; if cash didn't move, it isn't here. Profit
+                  and cash are different things, so when you're wondering where it all went, or whether
+                  the shop can afford a big collection buy, read this one.`],
+              ].map(([k, v]) => (
+                <div key={k} style={g.dlRow}>
+                  <dt style={g.dt}>{k}</dt>
+                  <dd style={g.dd}>{v}</dd>
+                </div>
+              ))}
+            </dl>
+            <p style={{ ...g.p, marginTop: 12, opacity: .75 }}>
+              Read them together: the P&amp;L says whether you earned it, the Balance Sheet says
+              where it&apos;s sitting, and the Cash Flow says how it moved.
+            </p>
+          </Section>
+
           <Section title="Where each number comes from">
             <dl style={g.dl}>
               {[

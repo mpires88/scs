@@ -2,7 +2,7 @@ import { describe, it, expect } from 'vitest'
 import {
   computeCogsProposal, computeOpenToBuy, inventoryBookBalance, lastDayOfMonth,
   computeRecurring, computeSalesTax, computeCloseChecklist, computeYearEndProjection,
-  computeTaxAccrualProposal, resolveRoleName, ADJUSTMENTS_ACCOUNT,
+  computeTaxAccrualProposal, computeSquareReconciliation, resolveRoleName, ADJUSTMENTS_ACCOUNT,
 } from '../insights'
 
 const METHOD = { sealedCostRatio: 65, restPct: 55, blendedPct: 70 }
@@ -155,6 +155,57 @@ describe('computeSalesTax — live chart category name', () => {
     const t = computeSalesTax({ squareReports, txns, year: 2026 })
     expect(t.liability).toBe(900)   // 1000 + 800 − 900
     expect(t.paid).toBe(900)        // only the real remittance, not the +accruals
+  })
+})
+
+describe('computeSquareReconciliation', () => {
+  const dep = (ym, amount, category = '1100 Square Deposits', account = 'FREEDOM CHECKING FOR BUSINESS') =>
+    ({ transaction_date: `${ym}-15`, amount, category, account })
+
+  it('cancels month-boundary timing in the cumulative line', () => {
+    const reports = [
+      { period: '2026-05', card_amount: 1000, fees: 50, cash_amount: 0 },
+      { period: '2026-06', card_amount: 0, fees: 0, cash_amount: 0 },
+    ]
+    // 900 of May's 950 expected lands in May; the last payout slips into June.
+    const txns = [dep('2026-05', 900), dep('2026-06', 50)]
+    const rec = computeSquareReconciliation({ reports, txns })
+    expect(rec.rows[0].cardDelta).toBe(-50)
+    expect(rec.rows[1].cardDelta).toBe(50)
+    expect(rec.card.cumulative).toBe(0)
+    expect(rec.card.state).toBe('ok')
+  })
+
+  it('keeps the lanes separate and excludes adjustment gross-ups', () => {
+    const reports = [{ period: '2026-06', card_amount: 500, fees: 0, cash_amount: 300 }]
+    const txns = [
+      dep('2026-06', 500),
+      dep('2026-06', 300, '1200 Cash Deposits'),
+      dep('2026-06', 999, '1100 Square Deposits', ADJUSTMENTS_ACCOUNT), // fee gross-up: not a deposit
+    ]
+    const rec = computeSquareReconciliation({ reports, txns })
+    expect(rec.rows[0].cardDelta).toBe(0)
+    expect(rec.rows[0].cashDelta).toBe(0)
+  })
+
+  it('flags a partial-report month as an anomaly', () => {
+    const reports = [{ period: '2026-02', card_amount: 14000, fees: 0, cash_amount: 6000 }]
+    const txns = [dep('2026-02', 26900), dep('2026-02', 12595, '1200 Cash Deposits')]
+    const rec = computeSquareReconciliation({ reports, txns })
+    expect(rec.rows[0].anomaly).toBe(true)
+  })
+
+  it('reports drift when the cumulative escapes the tolerance', () => {
+    const reports = [{ period: '2026-06', card_amount: 6000, fees: 0, cash_amount: 6000 }]
+    const txns = [dep('2026-06', 6000), dep('2026-06', 2000, '1200 Cash Deposits')]
+    const rec = computeSquareReconciliation({ reports, txns })
+    expect(rec.cash.cumulative).toBe(-4000)
+    expect(rec.cash.state).toBe('drift')  // tolerance = max(1000, 6000/30 × 5) = 1000
+    expect(rec.card.state).toBe('ok')
+  })
+
+  it('returns null without reports', () => {
+    expect(computeSquareReconciliation({ reports: [], txns: [] })).toBeNull()
   })
 })
 

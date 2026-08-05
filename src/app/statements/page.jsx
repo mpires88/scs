@@ -1,10 +1,8 @@
 'use client'
 
-// Kept so existing links to /balance still work — the balance sheet is the
-// second statement on the combined page.
 import FinancialStatements from '../../components/FinancialStatements'
 import { CLIENT_ID } from '../../lib/client'
 
-export default function BalanceSheetPage() {
+export default function FinancialStatementsPage() {
   return <FinancialStatements clientId={CLIENT_ID} />
 }

@@ -7,6 +7,7 @@ import { supabase } from '../lib/supabase'
 import { UnsavedChangesContext, useUnsavedChanges } from '../lib/unsavedChanges'
 import Login from './Login'
 import ErrorBoundary from './ErrorBoundary'
+import { PrintDisclosure } from './Disclosure'
 
 const AUTH_DISABLED = process.env.NEXT_PUBLIC_DISABLE_AUTH === 'true'
 
@@ -125,14 +126,16 @@ function IconHelp() {
 
 const NAV = [
   { group: null,      href: '/',             label: 'Dashboard',         Icon: IconGrid       },
-  { group: null,      href: '/transactions', label: 'Transactions',      Icon: IconCreditCard },
+  { group: null,      href: '/transactions', label: 'Transactions',      Icon: IconCreditCard,
+    // Square Reports merged in as a tab; /square still resolves here.
+    alsoActive: ['/square'] },
   { group: null,      href: '/close',        label: 'Month-End Close',   Icon: IconCheckCircle },
-  { group: 'Reports', href: '/pl',           label: 'P&L Statement',     Icon: IconStatement  },
-  { group: 'Reports', href: '/balance',      label: 'Balance Sheet',     Icon: IconScale      },
+  { group: 'Reports', href: '/statements',   label: 'Financial Statements', Icon: IconStatement,
+    // /pl and /balance still resolve to this page, so they light it up too.
+    alsoActive: ['/pl', '/balance'] },
   { group: 'Reports', href: '/year-end',     label: 'Year-End',          Icon: IconCalendar   },
   { group: 'Reports', href: '/buys',         label: 'Inventory Buys',    Icon: IconTag        },
   { group: 'Admin',   href: '/accounts',     label: 'Chart of Accounts', Icon: IconBook       },
-  { group: 'Admin',   href: '/square',       label: 'Square Reports',    Icon: IconSquare     },
   { group: 'Admin',   href: '/settings',     label: 'Settings',          Icon: IconSliders    },
 ]
 
@@ -190,7 +193,7 @@ export default function Shell({ children }) {
                     {item.group}
                   </div>
                 )}
-                <NavItem item={item} active={pathname === item.href} />
+                <NavItem item={item} active={pathname === item.href || (item.alsoActive ?? []).includes(pathname)} />
               </div>
             )
           })}
@@ -225,6 +228,9 @@ export default function Shell({ children }) {
           {children}
         </ErrorBoundary>
       </main>
+
+      {/* Repeats on every printed page, whatever page is printing. */}
+      <PrintDisclosure />
     </div>
     </UnsavedChangesContext.Provider>
   )

@@ -13,6 +13,21 @@ export const PIE_COLORS = [
 
 export const MON = ['', 'Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec']
 
+// Statement table geometry. The P&L, Balance Sheet and Cash Flow stack on one
+// page, so their columns have to be the same width or the eye can't read down
+// a month across the three. Kept here rather than in each component precisely
+// so they can't drift apart.
+//
+// The label column is fixed and truncates (with a title tooltip) — letting it
+// size to content would make the widest account name on any one statement throw
+// the other two out of line.
+export const STMT = {
+  label:   240,   // account / line name
+  num:      56,   // one month
+  numWide:  64,   // one year, in the yearly view
+  total:    74,
+}
+
 export const fmt = n => {
   if (n == null || isNaN(n)) return '—'
   return (n < 0 ? '-' : '') + '$' + Math.abs(Math.round(n)).toLocaleString()
@@ -33,4 +48,10 @@ export const fmtPeriod = p => {
   if (!p) return ''
   const [y, m] = p.split('-')
   return new Date(+y, +m - 1, 1).toLocaleString('default', { month: 'long', year: 'numeric' })
+}
+
+// Compact column label for a 'YYYY-MM' key: "Mar '24".
+export const fmtYm = ym => {
+  const [y, m] = String(ym).split('-')
+  return `${MON[+m]} '${String(y).slice(2)}`
 }

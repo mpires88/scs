@@ -287,6 +287,65 @@ export function computeSalesTax({ squareReports, txns, year }) {
 // the description rather than the category, because Bank & Credit Card Fees
 // holds ordinary bank charges too — a month with an ATM fee is not a month
 // whose Square fee has been booked.
+// ─── Square ↔ bank reconciliation ────────────────────────────────────────────
+// Two lanes. CARD: the report's card collections minus fees is what Square
+// eventually deposits; the bank's Square Deposits rows are what arrived.
+// CASH: the register knows what was collected; the bank knows what was
+// deposited. Monthly deltas are timing noise — a payout or a drive to the
+// bank crossing month-end — so the CUMULATIVE line carries the signal. Card
+// cumulative should hover near a few days of card volume (the in-transit
+// float). Cash cumulative should hover near zero: persistently negative means
+// collected cash isn't reaching the bank (an unrecorded owner draw, or till
+// cash spent directly); persistently positive means the bank receives cash
+// the register never rang.
+
+export function computeSquareReconciliation({ reports, txns }) {
+  if (!reports?.length) return null
+
+  const lanes = { card: {}, cash: {} }
+  txns.forEach(t => {
+    if (t.account === ADJUSTMENTS_ACCOUNT) return // gross-ups aren't deposits
+    const role = stripAcctNum(t.category)
+    const lane = role === 'Square Deposits' ? 'card' : role === 'Cash Deposits' ? 'cash' : null
+    if (!lane) return
+    const ym = (t.transaction_date || '').slice(0, 7)
+    if (ym) lanes[lane][ym] = (lanes[lane][ym] ?? 0) + (Number(t.amount) || 0)
+  })
+
+  const sorted = [...reports]
+    .filter(r => r.period)
+    .sort((a, b) => a.period.localeCompare(b.period))
+  let cardCum = 0, cashCum = 0
+  const r2 = n => Math.round(n * 100) / 100
+  const rows = sorted.map(r => {
+    const cardExpected  = r2((Number(r.card_amount) || 0) - (Number(r.fees) || 0))
+    const cashCollected = r2(Number(r.cash_amount) || 0)
+    const cardGot  = r2(lanes.card[r.period] ?? 0)
+    const cashGot  = r2(lanes.cash[r.period] ?? 0)
+    const cardDelta = r2(cardGot - cardExpected)
+    const cashDelta = r2(cashGot - cashCollected)
+    cardCum = r2(cardCum + cardDelta)
+    cashCum = r2(cashCum + cashDelta)
+    // A month whose delta dwarfs normal timing float is its own signal —
+    // usually a partial report (both lanes spike) or a miscategorized deposit.
+    const anomaly = Math.abs(cardDelta) > Math.max(500, Math.abs(cardExpected) * 0.2)
+      || Math.abs(cashDelta) > Math.max(500, Math.abs(cashCollected) * 0.2)
+    return { period: r.period, cardExpected, cardGot, cardDelta, cardCum, cashCollected, cashGot, cashDelta, cashCum, anomaly }
+  })
+
+  // Tolerance per lane: five days of recent average daily volume, floored.
+  const recent = sorted.slice(-3)
+  const daily = key => recent.reduce((s, r) => s + (Number(r[key]) || 0), 0) / ((recent.length || 1) * 30)
+  const tol = key => r2(Math.max(1000, daily(key) * 5))
+  const cardTolerance = tol('card_amount')
+  const cashTolerance = tol('cash_amount')
+  return {
+    rows,
+    card: { cumulative: cardCum, tolerance: cardTolerance, state: Math.abs(cardCum) <= cardTolerance ? 'ok' : 'drift' },
+    cash: { cumulative: cashCum, tolerance: cashTolerance, state: Math.abs(cashCum) <= cashTolerance ? 'ok' : 'drift' },
+  }
+}
+
 export function computeSquareFeeProposal({ month, squareReports, txns }) {
   if (!month) return null
   const fees = Number(squareReports.find(r => r.period === month)?.fees) || 0

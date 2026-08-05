@@ -1,7 +1,7 @@
 import { useState, useEffect, useCallback, useMemo, useRef, Fragment } from 'react'
-import { supabase } from '../lib/supabase'
+import { supabase, fetchAll } from '../lib/supabase'
 import { fetchSectionMap } from '../lib/chartOfAccounts'
-import { ADJUSTMENTS_ACCOUNT } from '../lib/insights'
+import { ADJUSTMENTS_ACCOUNT, computeSquareReconciliation } from '../lib/insights'
 import { squareFeeRows, taxRows } from '../lib/monthEnd'
 import { T, fmt2 as fmt, fmtPeriod } from '../lib/theme'
 
@@ -279,6 +279,95 @@ function CoveragePanel({ reports }) {
   )
 }
 
+// ─── Bank ↔ Square reconciliation panel ──────────────────────────────────────
+// Fidelity check between what the reports say was collected and what the bank
+// actually received. Monthly deltas are timing noise (a payout or a cash run
+// crossing month-end); the cumulative line is the signal — see
+// computeSquareReconciliation for the lane semantics.
+
+const reconSigned = n => `${n > 0 ? '+' : ''}${fmt(n)}`
+
+function ReconChip({ label, lane, positiveMeans, negativeMeans }) {
+  const ok = lane.state === 'ok'
+  return (
+    <div style={{ flex: '1 1 250px', background: '#fff', border: `1px solid ${T.border}`, borderTop: `3px solid ${ok ? T.success : T.amber}`, borderRadius: 6, padding: '10px 12px' }}>
+      <div style={{ fontSize: 9, fontWeight: 700, color: T.gold, textTransform: 'uppercase', letterSpacing: '.06em', marginBottom: 4 }}>{label}</div>
+      <div style={{ fontSize: 18, fontWeight: 600, color: ok ? T.navy : T.amber }}>{reconSigned(lane.cumulative)}</div>
+      <div style={{ fontSize: 10, color: 'rgba(74,74,74,.6)', marginTop: 3, lineHeight: 1.5 }}>
+        {ok
+          ? <>within the ±{fmt(lane.tolerance)} timing tolerance</>
+          : <>{lane.cumulative >= 0 ? positiveMeans : negativeMeans}</>}
+      </div>
+    </div>
+  )
+}
+
+function ReconPanel({ recon }) {
+  const th = right => ({ textAlign: right ? 'right' : 'left', padding: '5px 9px', background: T.page, fontSize: 9, fontWeight: 700, color: T.gold, textTransform: 'uppercase', letterSpacing: '.05em', whiteSpace: 'nowrap', borderBottom: `2px solid ${T.border}`, position: 'sticky', top: 0 })
+  const td = { padding: '4px 9px', fontSize: 11, color: T.charcoal, textAlign: 'right', fontVariantNumeric: 'tabular-nums', whiteSpace: 'nowrap' }
+  const signed = reconSigned
+
+  return (
+    <div style={{ marginBottom: 24 }}>
+      <div style={{ fontSize: 9.5, fontWeight: 700, color: T.gold, textTransform: 'uppercase', letterSpacing: '.06em', marginBottom: 8 }}>
+        Bank ↔ Square Reconciliation
+      </div>
+      <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap', marginBottom: 10 }}>
+        <ReconChip
+          label="Card · cumulative (bank − expected)" lane={recon.card}
+          positiveMeans="bank received more than card sales minus fees — check for miscategorized deposits or a partial report month"
+          negativeMeans="bank received less than card sales minus fees — instant-transfer fees, loan withholding, or chargebacks the reports don't show"
+        />
+        <ReconChip
+          label="Cash · cumulative (deposited − collected)" lane={recon.cash}
+          positiveMeans="more cash deposited than the register rang — unrung sales, or owner cash filed as revenue"
+          negativeMeans="collected cash isn't reaching the bank — till spending or an unrecorded owner draw"
+        />
+      </div>
+      <div style={{ overflow: 'auto', maxHeight: 320, background: T.card, border: `1px solid ${T.border}`, borderRadius: 7 }}>
+        <table style={{ width: '100%', borderCollapse: 'collapse' }}>
+          <thead>
+            <tr>
+              <th style={th(false)}>Month</th>
+              <th style={th(true)}>Card expected</th>
+              <th style={th(true)}>Received</th>
+              <th style={th(true)}>Δ</th>
+              <th style={th(true)}>Cash collected</th>
+              <th style={th(true)}>Deposited</th>
+              <th style={th(true)}>Δ</th>
+              <th style={th(true)}>Cum card</th>
+              <th style={th(true)}>Cum cash</th>
+            </tr>
+          </thead>
+          <tbody>
+            {recon.rows.map(r => (
+              <tr key={r.period} style={{ borderBottom: `1px solid #F0EEE9`, background: r.anomaly ? '#FEF3C7' : 'transparent' }}>
+                <td style={{ ...td, textAlign: 'left', fontWeight: 500, color: r.anomaly ? '#92400E' : T.navy }}>
+                  {r.anomaly && '⚠ '}{fmtPeriod(r.period)}
+                </td>
+                <td style={td}>{fmt(r.cardExpected)}</td>
+                <td style={td}>{fmt(r.cardGot)}</td>
+                <td style={{ ...td, color: Math.abs(r.cardDelta) < 0.005 ? td.color : r.cardDelta > 0 ? T.success : T.danger }}>{signed(r.cardDelta)}</td>
+                <td style={td}>{fmt(r.cashCollected)}</td>
+                <td style={td}>{fmt(r.cashGot)}</td>
+                <td style={{ ...td, color: Math.abs(r.cashDelta) < 0.005 ? td.color : r.cashDelta > 0 ? T.success : T.danger }}>{signed(r.cashDelta)}</td>
+                <td style={{ ...td, fontWeight: 600 }}>{signed(r.cardCum)}</td>
+                <td style={{ ...td, fontWeight: 600 }}>{signed(r.cashCum)}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+      <p style={{ fontSize: 10, color: 'rgba(74,74,74,.55)', margin: '6px 2px 0', lineHeight: 1.5 }}>
+        Card expected = the report's card collections − fees. Monthly Δs wobble when a payout or a
+        cash run crosses month-end — judge the cumulative columns, not single months. Amber rows
+        deviate too far to be timing; the usual cause is a partial report (re-export that month's
+        .eml from Square) or a miscategorized deposit.
+      </p>
+    </div>
+  )
+}
+
 // ─── Component ────────────────────────────────────────────────────────────────
 
 // `headerLeft` lets the combined Transactions hub put its title and tab
@@ -291,6 +380,7 @@ export default function SquareReports({ clientId, headerLeft = null }) {
   const [preview,  setPreview]  = useState(null)
   const [saving,   setSaving]   = useState(false)
   const [msg,      setMsg]      = useState('')
+  const [revTxns,  setRevTxns]  = useState([])   // revenue-category bank rows, for reconciliation
   const fileRef = useRef(null)
 
   const load = useCallback(async () => {
@@ -301,6 +391,20 @@ export default function SquareReports({ clientId, headerLeft = null }) {
       .eq('client_id', clientId)
       .order('period', { ascending: false })
     setReports(data ?? [])
+    // Revenue-category bank rows feed the bank ↔ Square reconciliation. The
+    // chart supplies current names (they get renumbered), fetchAll pages past
+    // the 1,000-row cap.
+    try {
+      const { accounts } = await fetchSectionMap(clientId)
+      const revNames = accounts.filter(a => a.pl_section === 'Revenue').map(a => a.name)
+      const rows = revNames.length
+        ? await fetchAll(() => supabase.from('bank_transactions')
+            .select('transaction_date, amount, category, account')
+            .eq('client_id', clientId).in('category', revNames)
+            .order('transaction_date').order('id'))
+        : []
+      setRevTxns(rows)
+    } catch { setRevTxns([]) } // reconciliation is an extra — never block the page
     setLoading(false)
   }, [clientId])
 
@@ -331,6 +435,11 @@ export default function SquareReports({ clientId, headerLeft = null }) {
     ...reports.map(r => ({ kind: 'report', key: r.id, period: r.period, r })),
     ...missingMonths.map(p => ({ kind: 'missing', key: `missing-${p}`, period: p })),
   ].sort((a, b) => b.period.localeCompare(a.period)), [reports, missingMonths])
+
+  const recon = useMemo(
+    () => computeSquareReconciliation({ reports, txns: revTxns }),
+    [reports, revTxns]
+  )
 
   const handleFile = useCallback(file => {
     if (!file) return
@@ -549,6 +658,9 @@ export default function SquareReports({ clientId, headerLeft = null }) {
 
         {/* Upload coverage */}
         {!loading && reports.length > 0 && <CoveragePanel reports={reports} />}
+
+        {/* Bank ↔ Square reconciliation */}
+        {!loading && recon && <ReconPanel recon={recon} />}
 
         {/* Saved reports */}
         {loading ? (

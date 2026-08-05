@@ -50,7 +50,9 @@ function mixedTitle(g, catOf) {
 
 // ─── Transactions Page ────────────────────────────────────────────────────────
 
-export default function Transactions({ clientId = null }) {
+// `headerLeft` lets the combined Transactions hub put its title and tab
+// switcher where the standalone title sits; the live stats line stays.
+export default function Transactions({ clientId = null, headerLeft = null }) {
   const [txns,        setTxns]        = useState([])
   const [loading,     setLoading]     = useState(true)
   const [loadError,   setLoadError]   = useState(null)
@@ -638,7 +640,7 @@ export default function Transactions({ clientId = null }) {
       {/* Page header */}
       <header style={s.pageHeader}>
         <div>
-          <h2 style={s.h2}>Transactions</h2>
+          {headerLeft ?? <h2 style={s.h2}>Transactions</h2>}
           <p style={s.sub}>
             {!isFlat && <>{groups.length} merchant groups · </>}
             {dateFiltered.length} transaction{dateFiltered.length !== 1 ? 's' : ''}

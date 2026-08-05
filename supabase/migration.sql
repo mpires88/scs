@@ -92,3 +92,20 @@ create policy "authenticated full access" on public.client_settings
 drop policy if exists "authenticated full access" on public.inventory_buys;
 create policy "authenticated full access" on public.inventory_buys
   for all to authenticated using (true) with check (true);
+
+-- ── 6. client_id type alignment ──────────────────────────────────────────────
+-- bank_transactions.client_id was text while every other table used uuid, so
+-- any join against it failed with "operator does not exist: text = uuid".
+-- Idempotent: only converts while the column is still text.
+do $$
+begin
+  if (select data_type
+        from information_schema.columns
+       where table_schema = 'public'
+         and table_name   = 'bank_transactions'
+         and column_name  = 'client_id') = 'text'
+  then
+    alter table public.bank_transactions
+      alter column client_id type uuid using client_id::uuid;
+  end if;
+end $$;

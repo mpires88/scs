@@ -1,8 +1,8 @@
 'use client'
 
-import Transactions from '../../components/Transactions'
+import TransactionsHub from '../../components/TransactionsHub'
 import { CLIENT_ID } from '../../lib/client'
 
 export default function TransactionsPage() {
-  return <Transactions clientId={CLIENT_ID} />
+  return <TransactionsHub clientId={CLIENT_ID} />
 }
