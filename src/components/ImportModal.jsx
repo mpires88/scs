@@ -117,7 +117,7 @@ export default function ImportModal({ clientId, allCats, groupedCats = null, exi
   const setProp = (key, val) => setCfg(c => ({ ...c, [key]: val }))
 
   const onApplyMapping = () => {
-    const { cols, dateFormat, splitAmounts, debitsPositive, bankName } = cfg
+    const { cols, dateFormat, splitAmounts, debitsPositive, bankName, catSource } = cfg
     if (!cols.transaction_date)                      { setMapError('Please map the Date column'); return }
     if (!cols.description)                           { setMapError('Please map the Description column'); return }
     if (!splitAmounts && !cols.amount)               { setMapError('Please map the Amount column'); return }
@@ -152,7 +152,11 @@ export default function ImportModal({ clientId, allCats, groupedCats = null, exi
         ...(chosenAcct                                  ? { account:      chosenAcct                    }
           : cols.account      && raw[cols.account]      ? { account:      raw[cols.account].trim()      } : {}),
         ...(cols.reference_id && raw[cols.reference_id] ? { reference_id: raw[cols.reference_id].trim() } : {}),
-        ...(cols.category     && raw[cols.category]     ? { category:     raw[cols.category].trim()     } : {}),
+        // Dropping the category here is what lets the suggestion engine fill it:
+        // resolveImportCategory only falls back to the group's category — the
+        // suggested one — when the row itself carries none.
+        ...(catSource !== 'suggest' && cols.category && raw[cols.category]
+          ? { category: raw[cols.category].trim() } : {}),
         ...(clientId !== null ? { client_id: clientId } : {}),
       })
     })
@@ -411,7 +415,15 @@ export default function ImportModal({ clientId, allCats, groupedCats = null, exi
               <ISection title="Account">
                 <IRow label={<>Account<span style={{ color: '#dc2626' }}> *</span></>}>
                   <AccountSelect
-                    registry={registry} value={acctChoice} onChange={setAcctChoice}
+                    registry={registry} value={acctChoice}
+                    onChange={key => {
+                      setAcctChoice(key)
+                      // A card export carries the issuer's own taxonomy, which
+                      // means nothing in this chart — default those to
+                      // suggestions. Still overridable below.
+                      const entry = registry.find(e => e.key === key)
+                      if (entry) setProp('catSource', entry.type === 'card' ? 'suggest' : 'file')
+                    }}
                     columnOption={!!cfg.cols.account}
                   />
                 </IRow>
@@ -451,6 +463,23 @@ export default function ImportModal({ clientId, allCats, groupedCats = null, exi
                     </IRow>
                   )
                 })}
+
+                <IRow label="Category from">
+                  <select style={m.select} value={cfg.catSource}
+                    onChange={e => setProp('catSource', e.target.value)}>
+                    <option value="file">The file&apos;s Category column</option>
+                    <option value="suggest">Suggest from previous transactions</option>
+                  </select>
+                </IRow>
+                <p style={{ fontSize: 12, color: '#6b7280', margin: '0 0 0 232px' }}>
+                  {cfg.catSource === 'suggest'
+                    ? <>The file&apos;s categories are ignored. Each row is matched on its description
+                        against how you filed that merchant before — right for card exports, whose
+                        categories are the issuer&apos;s, not yours.</>
+                    : cfg.cols.category
+                      ? <>Each row keeps the category in the file. Rows with none fall back to a suggestion.</>
+                      : <>No Category column is mapped, so every row will be suggested from your history anyway.</>}
+                </p>
               </ISection>
 
               <ISection title="Date Format">

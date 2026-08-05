@@ -100,8 +100,15 @@ export const STANDARD_FIELDS = [
   { key: 'category',         label: 'Category',     required: false },
 ]
 
+// catSource: where each row's category comes from.
+//   'file'    — the mapped Category column (a bookkeeping export you trust)
+//   'suggest' — ignore the file and match the description against how you have
+//               categorized that merchant before. Card exports carry the
+//               ISSUER's taxonomy ("Gas/Automotive", "Merchandise"), which means
+//               nothing in this chart of accounts.
 export const DEFAULT_CFG = () => ({
   bankName: '', dateFormat: 'MM/DD/YYYY', splitAmounts: false, debitsPositive: false,
+  catSource: 'file',
   cols: { transaction_date: '', description: '', amount: '', credit: '', debit: '', account: '', reference_id: '', category: '' },
 })
 

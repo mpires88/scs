@@ -1,5 +1,6 @@
 import { describe, it, expect } from 'vitest'
-import { parseCSVText, parseBankCSV, parseDate, fingerprint, autoDetectCols } from '../csv'
+import { parseCSVText, parseBankCSV, parseDate, fingerprint, autoDetectCols, DEFAULT_CFG } from '../csv'
+import { resolveImportCategory } from '../categorize'
 
 describe('autoDetectCols — Capital One card export', () => {
   // Real header row from a Capital One transaction_download CSV.
@@ -131,5 +132,53 @@ describe('parseBankCSV', () => {
 
   it('returns empty shape when nothing parses', () => {
     expect(parseBankCSV('')).toEqual({ headers: [], rows: [], skipped: 0 })
+  })
+})
+
+// ─── Category sourcing ────────────────────────────────────────────────────────
+// A card export carries the ISSUER's taxonomy ("Gas/Automotive", "Merchandise"),
+// which means nothing in this chart of accounts. autoDetectCols happily maps
+// that column, so without an opt-out those labels would flow straight into the
+// books ahead of the app's own suggestions.
+
+describe('catSource', () => {
+  const CAPITAL_ONE = [
+    'Transaction Date,Posted Date,Description,Category,Debit,Credit',
+    '2026-06-01,2026-06-02,EXXON MANSFIELD SERVIC,Gas/Automotive,25.00,',
+    '2026-06-09,2026-06-09,AMAZON MKTPL*OS34C5XR3,Merchandise,115.77,',
+  ].join('\n')
+
+  it('defaults to trusting the file, so bank exports are unaffected', () => {
+    expect(DEFAULT_CFG().catSource).toBe('file')
+  })
+
+  it('auto-detects the issuer category column — the trap this setting exists for', () => {
+    const { headers } = parseBankCSV(CAPITAL_ONE)
+    expect(autoDetectCols(headers).cols.category).toBe('Category')
+  })
+
+  // Mirrors onApplyMapping's row build: dropping the category is what lets the
+  // suggestion engine fill it, since resolveImportCategory only falls back to
+  // the group's suggested category when the row itself carries none.
+  const buildRows = (text, catSource) => {
+    const { headers, rows } = parseBankCSV(text)
+    const { cols } = autoDetectCols(headers)
+    return rows.map(raw => ({
+      description: raw[cols.description].trim(),
+      ...(catSource !== 'suggest' && cols.category && raw[cols.category]
+        ? { category: raw[cols.category].trim() } : {}),
+    }))
+  }
+
+  it("keeps the issuer's categories when told to trust the file", () => {
+    expect(buildRows(CAPITAL_ONE, 'file').map(r => r.category))
+      .toEqual(['Gas/Automotive', 'Merchandise'])
+  })
+
+  it('drops them entirely when suggesting, leaving the row open to a suggestion', () => {
+    const rows = buildRows(CAPITAL_ONE, 'suggest')
+    expect(rows.every(r => !('category' in r))).toBe(true)
+    // …and an uncategorized row takes whatever its group was suggested.
+    expect(resolveImportCategory(rows[0], 'Vehicle & Fuel', false)).toBe('Vehicle & Fuel')
   })
 })
