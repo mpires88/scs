@@ -39,7 +39,21 @@ Reserved markers so adjustments are identifiable forever:
 
 ## 3. Phased implementation
 
-### Phase 0 — No code: provisional backfill now, calibrate at the first count
+### Phase 0 — Update 2026-08-04: tax-return anchors + the 20% markup
+
+The client's filed tax return(s) state year-end inventory (a guesstimate, not a count — but the best available anchor for history), and the client's standing markup is **20% on cost** ⇒ COGS ≈ **83.3% of selling price** (100/120; gross margin 16.7%).
+
+Calibration design once the filed figures arrive:
+- **2024 and 2025 anchor to the return.** `COGS_year = beginning inventory + purchases − ending inventory` per the filing; each year's effective ratio = `COGS_year ÷ revenue_year`; monthly entries distribute by revenue within the year. Book inventory then lands **exactly on the filed Dec-31 numbers** — the books agree with the returns, which the accountant will appreciate.
+- **2026 runs at the 83.3% markup ratio** until the ≈Sep 2026 count trues it up; the Dec 31 2026 count aligns the next filing.
+- The gap between each year's tax-implied ratio and 83.3% is reported, not hidden — it quantifies shrinkage/markdowns (or the guesstimate's error).
+- With a uniform 20% markup, the sealed/rest hybrid collapses: all three ratios set to 83.3 until evidence says otherwise.
+
+**Needed from the return(s)** (Schedule C Part III / Form 1125-A, Cost of Goods Sold): beginning inventory, purchases, ending inventory as filed — for tax years 2024 and 2025 if both exist. The filed *purchases* figure is also a valuable cross-check against the books ($136,775 in 2024, $295,116 in 2025).
+
+*(The original count-anchored phasing below still applies to 2026; "provisional" ratios are now the markup-derived 83.3%.)*
+
+### Phase 0 (original) — No code: provisional backfill now, calibrate at the first count
 
 - **0a. Provisional backfill (can run immediately).** With the sealed cost ratio (real) and a provisional rest % (from the target markup), generate a CSV of entry pairs for every month with revenue (2024-02 → present): hybrid formula where a Square breakdown exists, `revenue(month) × blendedPct` otherwise; dated month-end, marked per §1 with descriptions reading `COGS ESTIMATE (PROVISIONAL) — <YYYY-MM>`. Import via the app's Import CSV (auto-detects; entries have no Ref Num, descriptions are unique per month, so dedup is safe). **Result:** the P&L becomes usable this month — margins roughly right (sealed anchored to its real cost; only the non-sealed ~20–25% rides on the markup guess), and the dashboard no-COGS flags clear. Skipping 0a and waiting for the count is also fine — the flags stay up and stay honest — but 0a is recommended.
 - **0b. First count (~Sep 2026) → calibrate → regenerate.** Client counts the shelf **at cost** (what he paid, not sticker) on a one-page worksheet by Square category (Sealed / Singles / Supplies / Other; big-ticket graded cards listed individually). Calibration anchors to the count date: total COGS through that day = `purchases through that day − shelf on that day`; subtract the sealed-specific COGS for breakdown months, and the remainder over the corresponding revenue gives the calibrated `restPct`/`blendedPct`. Then **delete the provisional entries and regenerate the backfill** with the calibrated numbers — they're wholesale identifiable (`account='Adjustments'`), so this is a clean restatement, not a distorting catch-up entry in September. Sanity-check calibrated vs. target markup (e.g. 100% markup ⇒ 50% COGS; if calibrated says 68%, the 18-point gap is shrinkage/aging/markdowns — worth showing the client). From here the quarterly loop runs on schedule — the **Dec 31 count is next**, doubling as the year-end count.
