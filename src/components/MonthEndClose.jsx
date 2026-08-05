@@ -5,7 +5,7 @@ import { fetchSectionMap } from '../lib/chartOfAccounts'
 import { getSetting, setSetting } from '../lib/settings'
 import {
   buildMonthlyPL, computeCloseChecklist, computeCogsProposal,
-  computeTaxAccrualProposal, ADJUSTMENTS_ACCOUNT,
+  computeTaxAccrualProposal, computeSquareFeeProposal, ADJUSTMENTS_ACCOUNT,
 } from '../lib/insights'
 import { buildMonthEndRows } from '../lib/monthEnd'
 import { T, MON, fmt2 } from '../lib/theme'
@@ -29,6 +29,7 @@ export default function MonthEndClose({ clientId }) {
   const [txns,       setTxns]       = useState([])
   const [squareReports, setSquare]  = useState([])
   const [sectionMap, setSectionMap] = useState({})
+  const [accounts,   setAccounts]   = useState([]) // chart rows — booking resolves role names against it
   const [cogsMethod, setCogsMethod] = useState(null)
   const [invCounts,  setInvCounts]  = useState([])
   const [closed,     setClosed]     = useState([])
@@ -64,6 +65,7 @@ export default function MonthEndClose({ clientId }) {
         setTxns(rows)
         setSquare(sqRes.data ?? [])
         setSectionMap(coaRes.map)
+        setAccounts(coaRes.accounts ?? [])
         setCogsMethod(methodVal)
         setInvCounts(Array.isArray(countsVal) ? countsVal : [])
         setClosed(Array.isArray(closedVal) ? closedVal : [])
@@ -114,13 +116,17 @@ export default function MonthEndClose({ clientId }) {
     () => month ? computeTaxAccrualProposal({ month, squareReports, txns }) : null,
     [month, squareReports, txns]
   )
+  const feeProposal = useMemo(
+    () => month ? computeSquareFeeProposal({ month, squareReports, txns }) : null,
+    [month, squareReports, txns]
+  )
 
   const isClosed = !!month && closed.includes(month)
   const pending = useMemo(
     () => checklist ? buildMonthEndRows({
-      month, cogsProposal, taxProposal, cogsBooked: checklist.cogsBooked,
+      month, cogsProposal, taxProposal, feeProposal, cogsBooked: checklist.cogsBooked, accounts,
     }) : [],
-    [month, cogsProposal, taxProposal, checklist]
+    [month, cogsProposal, taxProposal, feeProposal, checklist, accounts]
   )
 
   // ── Actions ────────────────────────────────────────────────────────────────

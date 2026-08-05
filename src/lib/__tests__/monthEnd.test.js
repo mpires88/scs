@@ -1,5 +1,23 @@
 import { describe, it, expect } from 'vitest'
-import { cogsRows, taxRows, buildMonthEndRows, trueUpRows, quarterLabel } from '../monthEnd'
+import { cogsRows, taxRows, buildMonthEndRows, trueUpRows, quarterLabel, squareFeeRows } from '../monthEnd'
+
+describe('role resolution against a renamed chart', () => {
+  const accounts = [
+    { name: '3000 Product Costs' }, { name: 'Inventory' },
+    { name: '2100 Sales Tax Collected' }, { name: 'Sales Tax Payable' },
+  ]
+  it('books entries under the chart-of-accounts CURRENT names', () => {
+    expect(cogsRows('2026-07', 100, accounts).map(r => r.category))
+      .toEqual(['3000 Product Costs', 'Inventory'])
+    expect(taxRows('2026-07', 100, accounts).map(r => r.category))
+      .toEqual(['2100 Sales Tax Collected', 'Sales Tax Payable'])
+    expect(trueUpRows({ date: '2026-09-30', quarterLabel: 'Q3 2026', adjustment: 50, accounts })
+      .map(r => r.category)).toEqual(['3000 Product Costs', 'Inventory'])
+  })
+  it('falls back to the plain role names without an accounts list', () => {
+    expect(cogsRows('2026-07', 100).map(r => r.category)).toEqual(['Product Costs', 'Inventory'])
+  })
+})
 import { computeCloseChecklist } from '../insights'
 
 const sum = rows => rows.reduce((s, r) => s + r.amount, 0)
@@ -93,5 +111,39 @@ describe('computeCloseChecklist month override', () => {
   it('flags quarter ends from the selected month', () => {
     expect(computeCloseChecklist({ ...base, month: '2026-03' }).isQuarterEnd).toBe(true)
     expect(computeCloseChecklist({ ...base, month: '2026-05' }).isQuarterEnd).toBe(false)
+  })
+})
+
+// ─── Square fee gross-up ──────────────────────────────────────────────────────
+
+describe('squareFeeRows / buildMonthEndRows fee leg', () => {
+  const ACCOUNTS = [
+    { name: '1100 Square Deposits', pl_section: 'Revenue' },
+    { name: 'Processing Fees',      pl_section: 'Operating Expenses' },
+  ]
+
+  it('books the fee as an expense and grosses revenue back up, netting zero', () => {
+    const rows = squareFeeRows('2026-06', 1037.91, ACCOUNTS)
+    expect(rows).toHaveLength(2)
+    expect(rows.reduce((s, r) => s + r.amount, 0)).toBeCloseTo(0, 6)
+    expect(rows[0]).toMatchObject({
+      transaction_date: '2026-06-30', amount: -1037.91, category: 'Processing Fees',
+    })
+    expect(rows[1]).toMatchObject({
+      transaction_date: '2026-06-30', amount: 1037.91, category: '1100 Square Deposits',
+    })
+  })
+
+  it('resolves the revenue role to whatever the chart currently calls it', () => {
+    expect(squareFeeRows('2026-06', 10, ACCOUNTS)[1].category).toBe('1100 Square Deposits')
+    expect(squareFeeRows('2026-06', 10, [])[1].category).toBe('Square Deposits')
+  })
+
+  it('is skipped once booked, and when there is no fee', () => {
+    const base = { month: '2026-06', accounts: ACCOUNTS, cogsBooked: true }
+    expect(buildMonthEndRows({ ...base, feeProposal: { amount: 500, booked: true } })).toEqual([])
+    expect(buildMonthEndRows({ ...base, feeProposal: { amount: 0, booked: false } })).toEqual([])
+    expect(buildMonthEndRows({ ...base, feeProposal: null })).toEqual([])
+    expect(buildMonthEndRows({ ...base, feeProposal: { amount: 500, booked: false } })).toHaveLength(2)
   })
 })

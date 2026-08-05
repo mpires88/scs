@@ -2,7 +2,7 @@ import { describe, it, expect } from 'vitest'
 import {
   computeCogsProposal, computeOpenToBuy, inventoryBookBalance, lastDayOfMonth,
   computeRecurring, computeSalesTax, computeCloseChecklist, computeYearEndProjection,
-  computeTaxAccrualProposal, ADJUSTMENTS_ACCOUNT,
+  computeTaxAccrualProposal, resolveRoleName, ADJUSTMENTS_ACCOUNT,
 } from '../insights'
 
 const METHOD = { sealedCostRatio: 65, restPct: 55, blendedPct: 70 }
@@ -175,6 +175,35 @@ describe('computeTaxAccrualProposal', () => {
   })
 })
 
+describe('role matching survives numbered account renames', () => {
+  it('recognizes booked COGS and tax accruals under renamed categories', () => {
+    const now = new Date('2026-08-10T12:00:00') // checklist month = 2026-07
+    const base = { squareReports: [{ period: '2026-07', tax_collected: 500 }], uncatCount: 0, prevMonthTxnCount: 5 }
+    const txns = [
+      { category: '3000 Product Costs', transaction_date: '2026-07-31' },
+      { category: '2100 Sales Tax Collected', transaction_date: '2026-07-31' },
+    ]
+    const cl = computeCloseChecklist({ ...base, txns, now })
+    expect(cl.cogsBooked).toBe(true)
+    expect(cl.taxAccrued).toBe(true)
+    expect(computeTaxAccrualProposal({ month: '2026-07', squareReports: base.squareReports, txns }).booked).toBe(true)
+  })
+
+  it('computes the inventory balance across renamed Inventory categories', () => {
+    expect(inventoryBookBalance([
+      { category: 'Inventory', amount: -1000 },
+      { category: '1500 Inventory', amount: -500 },
+    ])).toBe(1500)
+  })
+
+  it('resolveRoleName finds the chart-of-account name for a role', () => {
+    const accounts = [{ name: '3000 Product Costs' }, { name: 'Inventory' }]
+    expect(resolveRoleName(accounts, 'Product Costs')).toBe('3000 Product Costs')
+    expect(resolveRoleName(accounts, 'Inventory')).toBe('Inventory')
+    expect(resolveRoleName(accounts, 'Sales Tax Payable')).toBe('Sales Tax Payable') // fallback
+  })
+})
+
 describe('computeCloseChecklist — COGS and quarterly count items', () => {
   const base = { squareReports: [], uncatCount: 0, prevMonthTxnCount: 5 }
 
@@ -332,5 +361,55 @@ describe('computeYearEndProjection', () => {
     expect(computeYearEndProjection({ monthlyPL: LAST_YEAR, year: 2025, now: AUG_3 })).toBeNull()          // past year
     expect(computeYearEndProjection({ monthlyPL: full, year: 2026, now: new Date(2027, 0, 5) })).toBeNull() // year over
     expect(computeYearEndProjection({ monthlyPL: LAST_YEAR, year: 2026, now: AUG_3 })).toBeNull()          // no actuals
+  })
+})
+
+// ─── Card payment categories per account ──────────────────────────────────────
+// A shared payment category can only reduce one account, so a second card needs
+// its own — and the reserve has to count both.
+
+describe('computeOpenToBuy — multiple cards', () => {
+  const now = new Date('2026-08-03T12:00:00')
+  const monthlyPL = [PL('2026-05'), PL('2026-06'), PL('2026-07')]
+  const mk = (category, amount, ym) => ({ category, amount, transaction_date: `${ym}-15` })
+  const cash = { amount: 20000, asOf: '2026-08-03' }
+  const base = { cash, monthlyPL, salesTax: { owed: 0 }, budget: {}, now }
+
+  const REGISTRY = [
+    { key: 'chk',  type: 'bank', label: 'Checking', matches: ['CHK'], boundCategories: [] },
+    { key: 'visa', type: 'card', label: 'Visa',     matches: ['VISA'],
+      boundCategories: ['2100 Credit Card Payment - Capital One'] },
+    { key: 'amex', type: 'card', label: 'Amex',     matches: ['AMEX'],
+      boundCategories: ['2200 Credit Card Payment - Chase'] },
+  ]
+  const txns = [
+    mk('2100 Credit Card Payment - Capital One', -300, '2026-05'),
+    mk('2100 Credit Card Payment - Capital One', -300, '2026-06'),
+    mk('2200 Credit Card Payment - Chase',       -600, '2026-06'),
+    mk('2200 Credit Card Payment - Chase',       -600, '2026-07'),
+  ]
+
+  it('counts every card’s payment category toward the reserve', () => {
+    const o = computeOpenToBuy({ ...base, txns, registry: REGISTRY })
+    expect(o.breakdown.ccMonthly).toBeCloseTo(1800 / 3, 2) // both cards, 3 months
+  })
+
+  it('ignores categories bound to a bank account, which are not card debt', () => {
+    const withBank = REGISTRY.map(e =>
+      e.key === 'chk' ? { ...e, boundCategories: ['4100 Occupancy'] } : e)
+    const o = computeOpenToBuy({ ...base, txns: [...txns, mk('4100 Occupancy', -900, '2026-05')], registry: withBank })
+    expect(o.breakdown.ccMonthly).toBeCloseTo(1800 / 3, 2)
+  })
+
+  it('falls back to the default category when no registry is configured', () => {
+    const legacy = [mk('Credit Card Payment', -300, '2026-05'), mk('Credit Card Payment', -300, '2026-06')]
+    expect(computeOpenToBuy({ ...base, txns: legacy, registry: [] }).breakdown.ccMonthly).toBeCloseTo(200, 2)
+    expect(computeOpenToBuy({ ...base, txns: legacy }).breakdown.ccMonthly).toBeCloseTo(200, 2)
+  })
+
+  it('matches the payment category regardless of its account number', () => {
+    const renumbered = [mk('9999 Credit Card Payment - Capital One', -300, '2026-05')]
+    const o = computeOpenToBuy({ ...base, txns: renumbered, registry: REGISTRY })
+    expect(o.breakdown.ccMonthly).toBeCloseTo(100, 2)
   })
 })

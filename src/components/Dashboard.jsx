@@ -10,8 +10,8 @@ import {
   computeBreakeven, computeRecurring, computeSalesTax,
   computeRunway, computeCloseChecklist, computeCategoryMargins,
   computeCogsProposal, computeOpenToBuy, inventoryBookBalance,
-  computeTaxAccrualProposal, computeYearEndProjection, ADJUSTMENTS_ACCOUNT,
-  buildMonthlyPL,
+  computeTaxAccrualProposal, computeSquareFeeProposal, computeYearEndProjection, ADJUSTMENTS_ACCOUNT,
+  buildMonthlyPL, stripAcctNum,
 } from '../lib/insights'
 import { buildMonthEndRows, trueUpRows, quarterLabel } from '../lib/monthEnd'
 import { CogsCard, InventoryCard, OpenToBuyCard } from './InventoryOps'
@@ -100,6 +100,7 @@ export default function Dashboard({ clientId }) {
   const [cogsPct,       setCogsPct]       = useState({})     // squareCategory → %
   const [cogsMethod,    setCogsMethod]    = useState(null)   // { sealedCostRatio, restPct, blendedPct }
   const [purchaseBudget, setPurchaseBudget] = useState({})   // { cashFloor, depositHaircut }
+  const [registry,      setRegistry]      = useState([])     // client_settings 'ledger_accounts'
   const [invCounts,     setInvCounts]     = useState([])     // [{ date, counted, bookBefore, adjustment }]
   const [cogsBusy,      setCogsBusy]      = useState(false)
   const [loading,       setLoading]       = useState(true)
@@ -116,7 +117,7 @@ export default function Dashboard({ clientId }) {
       const now = new Date()
       const prevMonthStart = monthStart(new Date(now.getFullYear(), now.getMonth() - 1, 1))
       const curMonthStart  = monthStart(now)
-      const [txnRes, sqRes, coaRes, buysRes, uncatNull, uncatEmpty, prevMonthRes, cashVal, cogsVal, methodVal, budgetVal, countsVal] = await Promise.all([
+      const [txnRes, sqRes, coaRes, buysRes, uncatNull, uncatEmpty, prevMonthRes, cashVal, cogsVal, methodVal, budgetVal, countsVal, ledgerVal] = await Promise.all([
         fetchAll(() => supabase.from('bank_transactions').select('transaction_date, amount, category, description, account')
           .eq('client_id', clientId).not('category', 'is', null).neq('category', '')
           .order('transaction_date').order('id'))
@@ -138,6 +139,7 @@ export default function Dashboard({ clientId }) {
         getSetting(clientId, 'cogs_method', null).catch(() => null),
         getSetting(clientId, 'purchase_budget', {}).catch(() => ({})),
         getSetting(clientId, 'inventory_counts', []).catch(() => []),
+        getSetting(clientId, 'ledger_accounts', []).catch(() => []),
       ])
       if (!cancelled) {
         setTxns(txnRes.error ? [] : (txnRes.data ?? []))
@@ -152,6 +154,7 @@ export default function Dashboard({ clientId }) {
         setCogsMethod(methodVal)
         setPurchaseBudget(budgetVal || {})
         setInvCounts(Array.isArray(countsVal) ? countsVal : [])
+        setRegistry(Array.isArray(ledgerVal) ? ledgerVal : [])
         // A failed section map silently reclassifies everything as OpEx — surface it
         const loadErr = txnRes.error || coaRes.error
         if (loadErr) setError(loadErr.message)
@@ -220,15 +223,19 @@ export default function Dashboard({ clientId }) {
     () => computeTaxAccrualProposal({ month: checklist.month, squareReports, txns }),
     [checklist.month, squareReports, txns]
   )
+  const feeProposal = useMemo(
+    () => computeSquareFeeProposal({ month: checklist.month, squareReports, txns }),
+    [checklist.month, squareReports, txns]
+  )
   const projection = useMemo(
     () => curYear ? computeYearEndProjection({ monthlyPL, year: curYear }) : null,
     [monthlyPL, curYear]
   )
   const invBalance = useMemo(() => inventoryBookBalance(txns), [txns])
-  const hasInventoryTxns = useMemo(() => txns.some(t => t.category === 'Inventory'), [txns])
+  const hasInventoryTxns = useMemo(() => txns.some(t => stripAcctNum(t.category) === 'Inventory'), [txns])
   const openToBuy = useMemo(
-    () => computeOpenToBuy({ cash, txns, monthlyPL, salesTax, budget: purchaseBudget }),
-    [cash, txns, monthlyPL, salesTax, purchaseBudget]
+    () => computeOpenToBuy({ cash, txns, monthlyPL, salesTax, budget: purchaseBudget, registry }),
+    [cash, txns, monthlyPL, salesTax, purchaseBudget, registry]
   )
   // Booked COGS as % of revenue, current quarter to date — recalibration hint
   const impliedCogsPct = useMemo(() => {
@@ -239,7 +246,7 @@ export default function Dashboard({ clientId }) {
     }))
     const inQ = f => txns.reduce((s, t) =>
       (f(t) && qMonths.has((t.transaction_date || '').slice(0, 7))) ? s + (Number(t.amount) || 0) : s, 0)
-    const cogs = -inQ(t => t.category === 'Product Costs')
+    const cogs = -inQ(t => stripAcctNum(t.category) === 'Product Costs')
     const rev = monthlyPL.filter(r => qMonths.has(r.period)).reduce((s, r) => s + r.revenue, 0)
     return cogs > 0 && rev > 0 ? (cogs / rev) * 100 : null
   }, [txns, monthlyPL])
@@ -293,7 +300,7 @@ export default function Dashboard({ clientId }) {
   const bookMonthEnd = useCallback(async () => {
     if (cogsBusy) return
     const rows = buildMonthEndRows({
-      month: checklist.month, cogsProposal, taxProposal, cogsBooked: checklist.cogsBooked,
+      month: checklist.month, cogsProposal, taxProposal, feeProposal, cogsBooked: checklist.cogsBooked, accounts,
     })
     if (!rows.length) return
     setCogsBusy(true)
@@ -301,7 +308,7 @@ export default function Dashboard({ clientId }) {
       await insertAdjustmentPair(rows)
     } catch (e) { alert('Could not book month-end entries: ' + e.message) }
     setCogsBusy(false)
-  }, [cogsProposal, taxProposal, checklist, cogsBusy, insertAdjustmentPair])
+  }, [cogsProposal, taxProposal, feeProposal, checklist, cogsBusy, insertAdjustmentPair, accounts])
 
   const trueUpInventory = useCallback(async counted => {
     if (counted == null || cogsBusy) return
@@ -310,14 +317,14 @@ export default function Dashboard({ clientId }) {
     const date = d.toISOString().slice(0, 10)
     setCogsBusy(true)
     try {
-      const rows = trueUpRows({ date, quarterLabel: quarterLabel(d), adjustment })
+      const rows = trueUpRows({ date, quarterLabel: quarterLabel(d), adjustment, accounts })
       if (rows.length) await insertAdjustmentPair(rows)
       const nextCounts = [...invCounts, { date, counted, bookBefore: invBalance, adjustment }]
       setInvCounts(nextCounts)
       await setSetting(clientId, 'inventory_counts', nextCounts)
     } catch (e) { alert('Could not record the count: ' + e.message) }
     setCogsBusy(false)
-  }, [invBalance, invCounts, cogsBusy, insertAdjustmentPair, clientId])
+  }, [invBalance, invCounts, cogsBusy, insertAdjustmentPair, clientId, accounts])
 
   // ── Loading / error / empty states ────────────────────────────────────────
 

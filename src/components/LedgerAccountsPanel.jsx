@@ -5,6 +5,8 @@
 
 import { useState, useEffect, useCallback } from 'react'
 import { getSetting, setSetting } from '../lib/settings'
+import { fetchAccounts } from '../lib/chartOfAccounts'
+import { stripAcctNum } from '../lib/insights'
 import { T } from '../lib/theme'
 
 const slug = label => label.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '')
@@ -16,10 +18,14 @@ export default function LedgerAccountsPanel({ clientId }) {
   const [newType,  setNewType]  = useState('bank')
   const [drafts,   setDrafts]   = useState({})   // key → { match?, opening?, openingDate?, label? }
 
+  const [catNames, setCatNames] = useState([])
+
   useEffect(() => {
     let cancelled = false
     getSetting(clientId, 'ledger_accounts', []).catch(() => [])
       .then(v => { if (!cancelled) setRegistry(Array.isArray(v) ? v : []) })
+    fetchAccounts(clientId).then(r => { if (!cancelled) setCatNames((r.accounts ?? []).map(a => a.name)) })
+      .catch(() => {})
     return () => { cancelled = true }
   }, [clientId])
 
@@ -55,6 +61,28 @@ export default function LedgerAccountsPanel({ clientId }) {
     if (!m) return
     update(key, e => ({ ...e, matches: [...new Set([...(e.matches ?? []), m])] }))
     clearDraft(key, 'match')
+  }
+
+  // Bound categories resolve by name with any leading account number stripped,
+  // so "2100 Credit Card Payment" and "2200 Credit Card Payment" are the SAME
+  // binding — the later account would silently capture both cards' payments.
+  // Renumbering can't separate two cards; the names have to differ.
+  const bindingOwner = (cat, exceptKey) => registry.find(e =>
+    e.key !== exceptKey && (e.boundCategories || []).some(c => stripAcctNum(c) === stripAcctNum(cat)))
+
+  const addBound = key => {
+    const cat = draft(key, 'bound').trim()
+    if (!cat) return
+    const clash = bindingOwner(cat, key)
+    if (clash) {
+      alert(`“${stripAcctNum(cat)}” is already bound to “${clash.label}”.\n\n`
+        + 'A category can only reduce one account, so binding it twice would send both accounts\' '
+        + "payments to whichever is listed last. Give each card its own payment category "
+        + '(e.g. "Credit Card Payment - Capital One").')
+      return
+    }
+    update(key, e => ({ ...e, boundCategories: [...new Set([...(e.boundCategories ?? []), cat])] }))
+    clearDraft(key, 'bound')
   }
 
   const saveOpening = key => {
@@ -152,11 +180,38 @@ export default function LedgerAccountsPanel({ clientId }) {
             <span style={{ ...p.tiny, color: '#b6b2a8' }}>as of the day before the account&apos;s first imported transaction</span>
           </div>
 
-          {e.boundCategories?.length > 0 && (
-            <div style={{ ...p.tiny, marginTop: 6 }}>
-              Bound transfer categor{e.boundCategories.length !== 1 ? 'ies' : 'y'}: {e.boundCategories.join(', ')} — payments categorized there reduce this balance.
-            </div>
-          )}
+          <div style={{ display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap', marginTop: 6 }}>
+            <span style={p.tiny}>Payment categories:</span>
+            {(e.boundCategories ?? []).map(c => (
+              <span key={c} style={p.chip}>
+                {c}
+                <button
+                  title="Unbind this category"
+                  onClick={() => update(e.key, x => ({ ...x, boundCategories: (x.boundCategories ?? []).filter(v => v !== c) }))}
+                  style={p.chipX}
+                >×</button>
+              </span>
+            ))}
+            <select
+              style={{ ...p.input, width: 220, fontSize: 10.5 }}
+              value={draft(e.key, 'bound')}
+              onChange={ev => setDraft(e.key, 'bound', ev.target.value)}
+            >
+              <option value="">— bind a category…—</option>
+              {catNames
+                .filter(n => !(e.boundCategories ?? []).includes(n))
+                .map(n => {
+                  const clash = bindingOwner(n, e.key)
+                  return <option key={n} value={n} disabled={!!clash}>{n}{clash ? ` (bound to ${clash.label})` : ''}</option>
+                })}
+            </select>
+            <button style={p.btnSm} onClick={() => addBound(e.key)} disabled={!draft(e.key, 'bound')}>Bind</button>
+          </div>
+          <div style={{ ...p.tiny, marginTop: 3 }}>
+            {e.boundCategories?.length
+              ? <>Payments categorized here reduce this {e.type === 'card' ? 'card’s balance' : 'account'}. Each card needs its own — a shared category can only reduce one.</>
+              : <>None bound{e.type === 'card' ? ' — payments to this card won’t reduce its balance until one is' : ''}.</>}
+          </div>
         </div>
       ))}
 

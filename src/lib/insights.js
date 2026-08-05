@@ -265,13 +265,13 @@ export function computeSalesTax({ squareReports, txns, year }) {
 
   // Real remittances only: negative cash rows, never the accrual journal rows.
   const paid = txns
-    .filter(t => TAX_PAYMENT_CATS.has(t.category)
+    .filter(t => TAX_PAYMENT_CATS.has(stripAcctNum(t.category))
       && t.account !== ADJUSTMENTS_ACCOUNT
       && (Number(t.amount) || 0) < 0
       && (t.transaction_date || '').startsWith(String(year)))
     .reduce((s, t) => s + Math.abs(Number(t.amount) || 0), 0)
 
-  const liabilityRows = txns.filter(t => t.category === 'Sales Tax Payable')
+  const liabilityRows = txns.filter(t => hasRole(t.category, 'Sales Tax Payable'))
   const liability = liabilityRows.length
     ? Math.round(liabilityRows.reduce((s, t) => s + (Number(t.amount) || 0), 0) * 100) / 100
     : null
@@ -283,13 +283,27 @@ export function computeSalesTax({ squareReports, txns, year }) {
 // Sales-tax accrual proposal for one month: the Square report's tax_collected,
 // flagged booked once the accrual pair exists. Null when there's no report or
 // no tax that month.
+// Square's processing fee for a month, as a gross-up proposal. `booked` keys on
+// the description rather than the category, because Bank & Credit Card Fees
+// holds ordinary bank charges too — a month with an ATM fee is not a month
+// whose Square fee has been booked.
+export function computeSquareFeeProposal({ month, squareReports, txns }) {
+  if (!month) return null
+  const fees = Number(squareReports.find(r => r.period === month)?.fees) || 0
+  if (fees <= 0) return null
+  return {
+    amount: Math.round(fees * 100) / 100,
+    booked: txns.some(t => (t.description || '').startsWith(`SQUARE FEES — ${month}`)),
+  }
+}
+
 export function computeTaxAccrualProposal({ month, squareReports, txns }) {
   if (!month) return null
   const tax = Number(squareReports.find(r => r.period === month)?.tax_collected) || 0
   if (tax <= 0) return null
   return {
     amount: Math.round(tax * 100) / 100,
-    booked: txns.some(t => t.category === 'Sales Tax Collected' && (t.transaction_date || '').startsWith(month)),
+    booked: txns.some(t => hasRole(t.category, 'Sales Tax Collected') && (t.transaction_date || '').startsWith(month)),
   }
 }
 
@@ -339,9 +353,9 @@ export function computeCloseChecklist({ txns, squareReports, uncatCount, prevMon
     squareUploaded: squareReports.some(r => r.period === ym),
     allCategorized: uncatCount === 0,
     uncatCount,
-    cogsBooked: txns.some(t => t.category === 'Product Costs' && (t.transaction_date || '').startsWith(ym)),
+    cogsBooked: txns.some(t => hasRole(t.category, 'Product Costs') && (t.transaction_date || '').startsWith(ym)),
     taxApplicable: squareReports.some(r => r.period === ym && (Number(r.tax_collected) || 0) > 0),
-    taxAccrued: txns.some(t => t.category === 'Sales Tax Collected' && (t.transaction_date || '').startsWith(ym)),
+    taxAccrued: txns.some(t => hasRole(t.category, 'Sales Tax Collected') && (t.transaction_date || '').startsWith(ym)),
     isQuarterEnd,
     // The count is typically entered a few days into the next month (count
     // Sep 30, type it in Oct 2) — accept any count from the quarter's final
@@ -395,6 +409,15 @@ export function computeCategoryMargins({ squareReports, buys, cogsPct, year }) {
 
 export const ADJUSTMENTS_ACCOUNT = 'Adjustments'
 
+// Chart accounts get renamed with numbering prefixes ("3000 Product Costs",
+// "2100 Sales Tax Collected"). Role hooks — COGS booking, tax accrual, the
+// inventory balance — match with any leading number stripped so renames don't
+// orphan them, and resolve the chart's actual current name when inserting.
+export const stripAcctNum = name => String(name || '').replace(/^\d+\s+/, '')
+const hasRole = (category, role) => stripAcctNum(category) === role
+export const resolveRoleName = (accounts, role) =>
+  accounts.find(a => stripAcctNum(a.name) === role)?.name ?? role
+
 const round2 = n => Math.round(n * 100) / 100
 const pctToRatio = p => {
   const n = Number(p)
@@ -441,7 +464,7 @@ export function computeCogsProposal({ month, monthlyPL, squareReports, method })
 // relief entries positive, so the balance is minus the category sum).
 export function inventoryBookBalance(txns) {
   return round2(-txns
-    .filter(t => t.category === 'Inventory')
+    .filter(t => hasRole(t.category, 'Inventory'))
     .reduce((s, t) => s + (Number(t.amount) || 0), 0))
 }
 
@@ -452,8 +475,19 @@ export function inventoryBookBalance(txns) {
 // month-sized obligation window, even if some bills already cleared (the cash
 // entry already reflects them, so any double-count errs toward caution).
 
-export function computeOpenToBuy({ cash, txns, monthlyPL, salesTax, budget, now = new Date() }) {
+export function computeOpenToBuy({ cash, txns, monthlyPL, salesTax, budget, registry = [], now = new Date() }) {
   if (cash?.amount == null) return null
+
+  // Card payments come from whatever categories the ledger registry binds to a
+  // card, so a second card with its own payment category still counts toward
+  // the reserve. Falls back to the single default when no registry is set up.
+  const cardRoles = new Set(
+    (registry || [])
+      .filter(e => e.type === 'card')
+      .flatMap(e => e.boundCategories || [])
+      .map(stripAcctNum)
+  )
+  if (!cardRoles.size) cardRoles.add('Credit Card Payment')
 
   // Trailing 3 COMPLETE months — the in-progress month would drag averages down.
   const nowYM = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}`
@@ -463,13 +497,13 @@ export function computeOpenToBuy({ cash, txns, monthlyPL, salesTax, budget, now 
   const n = recent.length
 
   // Cash movements only — Adjustments rows are journal entries, not spending.
-  const sumCat = cat => txns.reduce((s, t) =>
-    (t.category === cat && t.account !== ADJUSTMENTS_ACCOUNT
+  const sumCat = role => txns.reduce((s, t) =>
+    (hasRole(t.category, role) && t.account !== ADJUSTMENTS_ACCOUNT
       && months.has((t.transaction_date || '').slice(0, 7)))
       ? s + (Number(t.amount) || 0) : s, 0)
 
   const avgOpex = recent.reduce((s, r) => s + r.totalOpex, 0) / n
-  const ccMonthly = Math.max(0, -sumCat('Credit Card Payment') / n)
+  const ccMonthly = Math.max(0, -[...cardRoles].reduce((s, role) => s + sumCat(role), 0) / n)
   // Prefer the liability balance (what's actually owed) over the YTD net.
   const taxOwed = Math.max(0, salesTax?.liability ?? salesTax?.owed ?? 0)
   const floor = Math.max(0, Number(budget?.cashFloor) || 0)

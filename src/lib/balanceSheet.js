@@ -16,7 +16,7 @@
 // hope. Balances are point-in-time at each month end of the selected year.
 
 import { BS_SECTIONS, isBSSection, ASSET_SECTIONS } from './sections'
-import { ADJUSTMENTS_ACCOUNT } from './insights'
+import { ADJUSTMENTS_ACCOUNT, stripAcctNum } from './insights'
 
 const ymOf = t => (t.transaction_date || '').slice(0, 7)
 const round2 = n => Math.round(n * 100) / 100
@@ -45,8 +45,10 @@ export function buildBalanceSheet({ txns, accounts, year, registry = [] }) {
     if (!matchCache.has(label)) matchCache.set(label, matchLedgerAccount(registry, label))
     return matchCache.get(label)
   }
-  const boundOwner = new Map() // category → registry entry
-  registry.forEach(e => (e.boundCategories || []).forEach(c => boundOwner.set(c, e)))
+  // Bound categories match with leading account numbers stripped, so a rename
+  // like "Credit Card Payment" → "4400 Credit Card Payment" keeps the binding.
+  const boundOwner = new Map() // stripped category name → registry entry
+  registry.forEach(e => (e.boundCategories || []).forEach(c => boundOwner.set(stripAcctNum(c), e)))
 
   // Per-entity, per-month sums. Entities: registry accounts, unmapped cash
   // accounts, BS categories, cumulative P&L (retained earnings), uncategorized.
@@ -86,7 +88,7 @@ export function buildBalanceSheet({ txns, accounts, year, registry = [] }) {
     // Category side
     const cat = (t.category || '').trim()
     if (!cat) { add('__uncat__', ym, amt); return }
-    const owner = boundOwner.get(cat)
+    const owner = boundOwner.get(stripAcctNum(cat))
     if (owner) { add(`reg:${owner.key}`, ym, amt); return }
     const section = sectionOf.get(cat) ?? 'Operating Expenses'
     if (isBSSection(section)) add(`cat:${cat}`, ym, amt)
