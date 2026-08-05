@@ -68,7 +68,7 @@ export default function Transactions({ clientId = null, headerLeft = null, initi
   // it has to reproduce the figure that was clicked, not merely resemble it.
   const [catFilter,   setCatFilter]   = useState(initialFilters?.cats ?? [])
   const [filter,      setFilter]      = useState('all')
-  const [view,        setView]        = useState(initialFilters?.view || 'grouped')  // 'grouped' | 'flat'
+  const [view,        setView]        = useState(initialFilters?.view || 'flat')  // 'grouped' | 'flat'
   const [dateFrom,    setDateFrom]    = useState(initialFilters?.from || '')
   const [dateTo,      setDateTo]      = useState(initialFilters?.to || '')
   const [acctFilter,  setAcctFilter]  = useState('')      // '' = all accounts
