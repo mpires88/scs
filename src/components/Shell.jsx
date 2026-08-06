@@ -101,6 +101,15 @@ function IconCalendar() {
   )
 }
 
+function IconTrending() {
+  return (
+    <svg {...iconProps}>
+      <polyline points="22 7 13.5 15.5 8.5 10.5 2 17" />
+      <polyline points="16 7 22 7 22 13" />
+    </svg>
+  )
+}
+
 function IconSliders() {
   return (
     <svg {...iconProps}>
@@ -134,6 +143,7 @@ const NAV = [
     // /pl and /balance still resolve to this page, so they light it up too.
     alsoActive: ['/pl', '/balance'] },
   { group: 'Reports', href: '/year-end',     label: 'Year-End',          Icon: IconCalendar   },
+  { group: 'Reports', href: '/planner',      label: 'Holiday Planner',   Icon: IconTrending   },
   { group: 'Reports', href: '/buys',         label: 'Inventory Buys',    Icon: IconTag        },
   { group: 'Admin',   href: '/accounts',     label: 'Chart of Accounts', Icon: IconBook       },
   { group: 'Admin',   href: '/settings',     label: 'Settings',          Icon: IconSliders    },

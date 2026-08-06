@@ -1,5 +1,6 @@
 import { describe, it, expect } from 'vitest'
-import { cogsRows, taxRows, buildMonthEndRows, trueUpRows, quarterLabel, squareFeeRows, discountRows } from '../monthEnd'
+import { cogsRows, taxRows, buildMonthEndRows, trueUpRows, quarterLabel, squareFeeRows, discountRows, staleDescriptions } from '../monthEnd'
+import { computeSquareFeeProposal, ADJUSTMENTS_ACCOUNT } from '../insights'
 
 describe('role resolution against a renamed chart', () => {
   const accounts = [
@@ -171,5 +172,42 @@ describe('discountRows', () => {
   it('resolves roles against the chart, falling back to plain names', () => {
     expect(discountRows('2026-06', 10, ACCOUNTS)[0].category).toBe('2200 Discounts')
     expect(discountRows('2026-06', 10, [])[0].category).toBe('Discounts')
+  })
+})
+
+
+// ─── Re-booking a corrected Square report ─────────────────────────────────────
+
+describe('stale month-end entries', () => {
+  const REPORTS = [{ period: '2026-06', fees: 1037.91, tax_collected: 2528.90 }]
+  const feeRows = amt => [
+    { description: 'SQUARE FEES — 2026-06', amount: -amt, account: ADJUSTMENTS_ACCOUNT },
+    { description: 'SQUARE FEE GROSS-UP — 2026-06', amount: amt, account: ADJUSTMENTS_ACCOUNT },
+  ]
+
+  it('treats a fee entry matching the report as booked', () => {
+    const p = computeSquareFeeProposal({ month: '2026-06', squareReports: REPORTS, txns: feeRows(1037.91) })
+    expect(p).toMatchObject({ booked: true, stale: false })
+    expect(staleDescriptions({ month: '2026-06', feeProposal: p })).toEqual([])
+  })
+
+  it('flags a fee entry the report has moved away from, and names what to clear', () => {
+    const p = computeSquareFeeProposal({ month: '2026-06', squareReports: REPORTS, txns: feeRows(900) })
+    expect(p).toMatchObject({ amount: 1037.91, bookedAmount: 900, booked: false, stale: true })
+    expect(staleDescriptions({ month: '2026-06', feeProposal: p }))
+      .toEqual(['SQUARE FEES — 2026-06', 'SQUARE FEE GROSS-UP — 2026-06'])
+  })
+
+  it('re-proposes the pair at the corrected amount', () => {
+    const p = computeSquareFeeProposal({ month: '2026-06', squareReports: REPORTS, txns: feeRows(900) })
+    const rows = buildMonthEndRows({ month: '2026-06', feeProposal: p, cogsBooked: true })
+    expect(rows).toHaveLength(2)
+    expect(rows.reduce((s, r) => s + r.amount, 0)).toBeCloseTo(0, 6)
+    expect(Math.abs(rows[0].amount)).toBe(1037.91)
+  })
+
+  it('leaves an entry alone when it still agrees, so re-booking never churns', () => {
+    const ok = computeSquareFeeProposal({ month: '2026-06', squareReports: REPORTS, txns: feeRows(1037.91) })
+    expect(buildMonthEndRows({ month: '2026-06', feeProposal: ok, cogsBooked: true })).toEqual([])
   })
 })

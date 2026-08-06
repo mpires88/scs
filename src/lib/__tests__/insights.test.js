@@ -213,12 +213,31 @@ describe('computeTaxAccrualProposal', () => {
   const squareReports = [{ period: '2026-07', tax_collected: 1890.5 }, { period: '2026-06', tax_collected: 0 }]
   it('proposes the report month tax and flags whether it is booked', () => {
     const p = computeTaxAccrualProposal({ month: '2026-07', squareReports, txns: [] })
-    expect(p).toEqual({ amount: 1890.5, booked: false })
+    expect(p).toEqual({ amount: 1890.5, booked: false, bookedAmount: null, stale: false })
     const booked = computeTaxAccrualProposal({
       month: '2026-07', squareReports,
-      txns: [{ category: 'Sales Tax Collected', transaction_date: '2026-07-31' }],
+      txns: [{ category: 'Sales Tax Collected', transaction_date: '2026-07-31', amount: -1890.5 }],
     })
-    expect(booked.booked).toBe(true)
+    expect(booked).toMatchObject({ booked: true, stale: false, bookedAmount: 1890.5 })
+  })
+
+  // Re-uploading a corrected Square report changes the figure the entry was
+  // built from; the entry itself does not follow, so it has to be spotted.
+  it('flags an entry booked at an amount the report no longer agrees with', () => {
+    const stale = computeTaxAccrualProposal({
+      month: '2026-07', squareReports,
+      txns: [{ category: 'Sales Tax Collected', transaction_date: '2026-07-31', amount: -1500 }],
+    })
+    expect(stale).toMatchObject({ amount: 1890.5, bookedAmount: 1500, booked: false, stale: true })
+  })
+
+  it('tolerates rounding rather than calling a penny a mismatch', () => {
+    const p = computeTaxAccrualProposal({
+      month: '2026-07', squareReports,
+      txns: [{ category: 'Sales Tax Collected', transaction_date: '2026-07-31', amount: -1890.499 }],
+    })
+    expect(p.booked).toBe(true)
+    expect(p.stale).toBe(false)
   })
   it('returns null without a report or with zero tax', () => {
     expect(computeTaxAccrualProposal({ month: '2026-06', squareReports, txns: [] })).toBeNull()
@@ -232,7 +251,7 @@ describe('role matching survives numbered account renames', () => {
     const base = { squareReports: [{ period: '2026-07', tax_collected: 500 }], uncatCount: 0, prevMonthTxnCount: 5 }
     const txns = [
       { category: '3000 Product Costs', transaction_date: '2026-07-31' },
-      { category: '2100 Sales Tax Collected', transaction_date: '2026-07-31' },
+      { category: '2100 Sales Tax Collected', transaction_date: '2026-07-31', amount: -500 },
     ]
     const cl = computeCloseChecklist({ ...base, txns, now })
     expect(cl.cogsBooked).toBe(true)

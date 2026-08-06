@@ -346,24 +346,41 @@ export function computeSquareReconciliation({ reports, txns }) {
   }
 }
 
+// Sum of an already-booked leg, or null when nothing is booked. Distinguishing
+// "not booked" from "booked as zero" is what lets a re-upload be detected.
+const bookedLeg = (txns, match) => {
+  const rows = txns.filter(match)
+  return rows.length ? round2(-rows.reduce((s, t) => s + (Number(t.amount) || 0), 0)) : null
+}
+
+// A proposal is `booked` only when the ledger AGREES with the report. Re-upload
+// a Square report with corrected figures and the old entry is now wrong — it is
+// reported as `stale` so the close screen can offer to replace it, rather than
+// silently leaving the books disagreeing with the report they came from.
+const proposal = (amount, booked) => ({
+  amount,
+  bookedAmount: booked,
+  booked: booked != null && Math.abs(booked - amount) < 0.005,
+  stale:  booked != null && Math.abs(booked - amount) >= 0.005,
+})
+
 export function computeSquareFeeProposal({ month, squareReports, txns }) {
   if (!month) return null
   const fees = Number(squareReports.find(r => r.period === month)?.fees) || 0
   if (fees <= 0) return null
-  return {
-    amount: Math.round(fees * 100) / 100,
-    booked: txns.some(t => (t.description || '').startsWith(`SQUARE FEES — ${month}`)),
-  }
+  return proposal(
+    round2(fees),
+    bookedLeg(txns, t => (t.description || '').startsWith(`SQUARE FEES — ${month}`)))
 }
 
 export function computeTaxAccrualProposal({ month, squareReports, txns }) {
   if (!month) return null
   const tax = Number(squareReports.find(r => r.period === month)?.tax_collected) || 0
   if (tax <= 0) return null
-  return {
-    amount: Math.round(tax * 100) / 100,
-    booked: txns.some(t => hasRole(t.category, 'Sales Tax Collected') && (t.transaction_date || '').startsWith(month)),
-  }
+  return proposal(
+    round2(tax),
+    bookedLeg(txns, t => hasRole(t.category, 'Sales Tax Collected')
+      && (t.transaction_date || '').startsWith(month)))
 }
 
 // ─── Cash runway ──────────────────────────────────────────────────────────────

@@ -53,6 +53,25 @@ export function discountRows(month, amount, accounts = []) {
   ]
 }
 
+// The descriptions each entry type writes for a month. Booking a correction has
+// to clear the old pair first, and deriving the delete from the same place as
+// the insert is what stops the two drifting apart.
+export const ENTRY_DESCRIPTIONS = {
+  cogs: month => [`COGS ESTIMATE — ${month}`, `INVENTORY RELIEF — ${month}`],
+  tax:  month => [`SALES TAX ACCRUAL — ${month}`, `SALES TAX LIABILITY — ${month}`],
+  fee:  month => [`SQUARE FEES — ${month}`, `SQUARE FEE GROSS-UP — ${month}`],
+}
+
+// Descriptions to remove before re-booking: only entries whose figures no
+// longer match the report they came from. An entry that still agrees is left
+// alone, so re-booking never churns rows that are already right.
+export function staleDescriptions({ month, taxProposal, feeProposal }) {
+  const out = []
+  if (taxProposal?.stale) out.push(...ENTRY_DESCRIPTIONS.tax(month))
+  if (feeProposal?.stale) out.push(...ENTRY_DESCRIPTIONS.fee(month))
+  return out
+}
+
 // Everything still pending for a month. Already-booked legs are skipped, so
 // calling this twice for the same month yields an empty array the second time.
 export function buildMonthEndRows({ month, cogsProposal, taxProposal, feeProposal, cogsBooked = false, accounts = [] }) {

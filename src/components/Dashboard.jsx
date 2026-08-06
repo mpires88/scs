@@ -13,7 +13,7 @@ import {
   computeTaxAccrualProposal, computeSquareFeeProposal, computeYearEndProjection, ADJUSTMENTS_ACCOUNT,
   buildMonthlyPL, stripAcctNum,
 } from '../lib/insights'
-import { buildMonthEndRows, trueUpRows, quarterLabel } from '../lib/monthEnd'
+import { buildMonthEndRows, staleDescriptions, trueUpRows, quarterLabel } from '../lib/monthEnd'
 import { CogsCard, InventoryCard, OpenToBuyCard } from './InventoryOps'
 import { T as D, PIE_COLORS, MON, fmt, fmtK, fmtPct } from '../lib/theme'
 import InfoTip from './InfoTip'
@@ -299,16 +299,29 @@ export default function Dashboard({ clientId }) {
   // the sales-tax accrual (tax portion of Square deposits → liability).
   const bookMonthEnd = useCallback(async () => {
     if (cogsBusy) return
+    const month = checklist.month
     const rows = buildMonthEndRows({
-      month: checklist.month, cogsProposal, taxProposal, feeProposal, cogsBooked: checklist.cogsBooked, accounts,
+      month, cogsProposal, taxProposal, feeProposal, cogsBooked: checklist.cogsBooked, accounts,
     })
     if (!rows.length) return
+    // A re-uploaded Square report can leave an entry booked at a figure the
+    // report no longer agrees with. Clear those first, or booking would stack a
+    // second pair on top of the stale one and double the month.
+    const stale = staleDescriptions({ month, taxProposal, feeProposal })
     setCogsBusy(true)
     try {
+      if (stale.length) {
+        const { error: delErr } = await supabase.from('bank_transactions')
+          .delete().eq('account', ADJUSTMENTS_ACCOUNT).in('description', stale)
+          .match(clientId !== null ? { client_id: clientId } : {})
+        if (delErr) throw delErr
+        setTxns(prev => prev.filter(t =>
+          !(t.account === ADJUSTMENTS_ACCOUNT && stale.includes(t.description))))
+      }
       await insertAdjustmentPair(rows)
     } catch (e) { alert('Could not book month-end entries: ' + e.message) }
     setCogsBusy(false)
-  }, [cogsProposal, taxProposal, feeProposal, checklist, cogsBusy, insertAdjustmentPair, accounts])
+  }, [cogsProposal, taxProposal, feeProposal, checklist, cogsBusy, insertAdjustmentPair, accounts, clientId])
 
   const trueUpInventory = useCallback(async counted => {
     if (counted == null || cogsBusy) return

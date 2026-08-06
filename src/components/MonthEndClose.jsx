@@ -7,7 +7,7 @@ import {
   buildMonthlyPL, computeCloseChecklist, computeCogsProposal,
   computeTaxAccrualProposal, computeSquareFeeProposal, ADJUSTMENTS_ACCOUNT,
 } from '../lib/insights'
-import { buildMonthEndRows } from '../lib/monthEnd'
+import { buildMonthEndRows, staleDescriptions } from '../lib/monthEnd'
 import { T, MON, fmt2 } from '../lib/theme'
 import InfoTip from './InfoTip'
 
@@ -133,8 +133,20 @@ export default function MonthEndClose({ clientId }) {
 
   const book = useCallback(async () => {
     if (busy || !pending.length) return
+    // Entries whose figures the report has moved away from are replaced, not
+    // added to — otherwise booking a correction stacks a second pair on the
+    // stale one and doubles the month.
+    const stale = staleDescriptions({ month, taxProposal, feeProposal })
     setBusy(true); setMsg('')
     try {
+      if (stale.length) {
+        const { error: delErr } = await supabase.from('bank_transactions')
+          .delete().eq('account', ADJUSTMENTS_ACCOUNT).in('description', stale)
+          .match(clientId !== null ? { client_id: clientId } : {})
+        if (delErr) throw delErr
+        setTxns(prev => prev.filter(t =>
+          !(t.account === ADJUSTMENTS_ACCOUNT && stale.includes(t.description))))
+      }
       const withMeta = pending.map(r => ({
         ...r, account: ADJUSTMENTS_ACCOUNT, ...(clientId !== null ? { client_id: clientId } : {}),
       }))
@@ -142,10 +154,12 @@ export default function MonthEndClose({ clientId }) {
         .insert(withMeta).select('transaction_date, amount, category, description, account')
       if (insErr) throw insErr
       setTxns(prev => [...prev, ...(data ?? withMeta)])
-      setMsg(`✓ Booked ${withMeta.length} entries for ${ymLabel(month)}`)
+      setMsg(stale.length
+        ? `✓ Re-booked ${withMeta.length} entries for ${ymLabel(month)} at the corrected figures`
+        : `✓ Booked ${withMeta.length} entries for ${ymLabel(month)}`)
     } catch (e) { alert('Could not book month-end entries: ' + e.message) }
     setBusy(false)
-  }, [busy, pending, clientId, month])
+  }, [busy, pending, clientId, month, taxProposal, feeProposal])
 
   const toggleClosed = useCallback(async () => {
     const next = isClosed ? closed.filter(m => m !== month) : [...closed, month].sort()
@@ -315,6 +329,17 @@ export default function MonthEndClose({ clientId }) {
             <div style={{ fontSize:12, fontWeight:600, color:'#7A6829', marginBottom:5 }}>
               {pending.length / 2} month-end {pending.length === 2 ? 'entry' : 'entries'} ready to book
             </div>
+            {/* A re-uploaded Square report leaves the old entry disagreeing with
+                the figures it came from — say so, and say what will happen. */}
+            {[['Sales tax', taxProposal], ['Square fees', feeProposal]]
+              .filter(([, pr]) => pr?.stale)
+              .map(([label, pr]) => (
+                <div key={label} style={{ fontSize:11.5, color:'#92400E', lineHeight:1.6, marginBottom:6 }}>
+                  ⚠ <strong>{label}</strong> is booked at {fmt2(pr.bookedAmount)} but the Square report
+                  now says {fmt2(pr.amount)} — the report was re-uploaded after the entry was made.
+                  Booking replaces the old pair rather than adding to it.
+                </div>
+              ))}
             <div style={{ fontSize:11.5, color:T.charcoal, lineHeight:1.6, marginBottom:10 }}>
               Each is a balanced pair dated {ymLabel(month)}, filed under the{' '}
               <strong>{ADJUSTMENTS_ACCOUNT}</strong> account. No cash moves.
@@ -325,7 +350,7 @@ export default function MonthEndClose({ clientId }) {
               ))}
             </ul>
             <button onClick={book} disabled={busy} style={{ ...btnPri, ...(busy ? { opacity:.5, cursor:'not-allowed' } : {}) }}>
-              {busy ? 'Booking…' : 'Book these entries'}
+              {busy ? 'Booking…' : (taxProposal?.stale || feeProposal?.stale ? 'Re-book at the corrected figures' : 'Book these entries')}
             </button>
           </div>
         )}
