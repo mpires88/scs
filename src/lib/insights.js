@@ -99,6 +99,9 @@ export function computeRecurring(txns, { minMonths = 3, maxItems = 8 } = {}) {
     const amt = Number(t.amount) || 0
     if (amt >= 0) return // bills only
     if (t.account === ADJUSTMENTS_ACCOUNT) return // COGS/true-up entries aren't bills
+    // Cash pulled from the bank (here, mostly to buy collections) is regular
+    // enough to pass the consistency filter, but there is no vendor behind it.
+    if (/\b(ATM|CASH) WITHDRAWAL\b/i.test(t.description || '')) return
     const key = normKey(t.description)
     if (!key) return
     if (!groups[key]) groups[key] = { key, displayDesc: t.description, items: [] }

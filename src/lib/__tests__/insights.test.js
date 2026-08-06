@@ -131,6 +131,14 @@ describe('computeRecurring — adjustment entries', () => {
     }))
     expect(computeRecurring(txns)).toEqual([])
   })
+
+  it('never reports cash withdrawals as recurring bills', () => {
+    const txns = [1, 2, 3, 4].map(m => ({
+      description: 'ATM WITHDRAWAL CASH WITHDRAWAL TERMINAL HG26431 158 MAIN STREET NORFOLK MA',
+      amount: -200, transaction_date: `2026-0${m}-15`, account: 'FREEDOM CHECKING FOR BUSINESS',
+    }))
+    expect(computeRecurring(txns)).toEqual([])
+  })
 })
 
 describe('computeSalesTax — live chart category name', () => {

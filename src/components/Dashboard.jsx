@@ -7,7 +7,7 @@ import { supabase, fetchAll } from '../lib/supabase'
 import { fetchSectionMap, isPLSection } from '../lib/chartOfAccounts'
 import { getSetting, setSetting } from '../lib/settings'
 import {
-  computeBreakeven, computeRecurring, computeSalesTax,
+  computeBreakeven, computeSalesTax,
   computeRunway, computeCloseChecklist, computeCategoryMargins,
   computeCogsProposal, computeOpenToBuy, inventoryBookBalance,
   computeTaxAccrualProposal, computeSquareFeeProposal, computeYearEndProjection, ADJUSTMENTS_ACCOUNT,
@@ -205,7 +205,6 @@ export default function Dashboard({ clientId }) {
     () => curYear ? computeBreakeven({ txns, accounts, sectionMap, monthlyPL, year: curYear }) : null,
     [txns, accounts, sectionMap, monthlyPL, curYear]
   )
-  const recurring = useMemo(() => computeRecurring(txns), [txns])
   const salesTax  = useMemo(
     () => curYear ? computeSalesTax({ squareReports, txns, year: curYear }) : null,
     [squareReports, txns, curYear]
@@ -715,41 +714,6 @@ export default function Dashboard({ clientId }) {
             </>
           )
         })()}
-
-        {/* ── Recurring bills ── */}
-        {recurring.length > 0 && (
-          <>
-            <SectionTitle>Recurring Bills Radar</SectionTitle>
-            <p style={{ fontSize:11, color:'rgba(74,74,74,0.65)', margin:'-8px 0 12px' }}>
-              Vendors that charge you regularly. A flag means the latest charge ran 25%+ above its average.
-            </p>
-            <div style={{ overflowX:'auto', background:D.card, border:`1px solid ${D.border}`, borderRadius:7, marginBottom:8 }}>
-              <table style={{ width:'100%', borderCollapse:'collapse' }}>
-                <thead>
-                  <tr>
-                    {['Vendor', 'Est. Monthly', 'Avg Charge', 'Last Charge', 'Last Seen', ''].map((h, i) => (
-                      <th key={i} style={{ textAlign: i === 0 ? 'left' : 'right', padding:'7px 12px', background:D.page, fontSize:9.5, fontWeight:700, color:D.gold, textTransform:'uppercase', letterSpacing:'.06em', whiteSpace:'nowrap', borderBottom:`2px solid ${D.border}` }}>{h}</th>
-                    ))}
-                  </tr>
-                </thead>
-                <tbody>
-                  {recurring.map((r, i) => (
-                    <tr key={i} style={{ borderBottom:`1px solid ${D.border}` }}>
-                      <td style={{ padding:'6px 12px', fontSize:11.5, color:D.charcoal, maxWidth:320, overflow:'hidden', textOverflow:'ellipsis', whiteSpace:'nowrap' }}>{r.desc}</td>
-                      <td style={{ padding:'6px 12px', fontSize:11.5, textAlign:'right', fontVariantNumeric:'tabular-nums', color:D.navy, fontWeight:600 }}>{fmt(r.monthlyEstimate)}</td>
-                      <td style={{ padding:'6px 12px', fontSize:11.5, textAlign:'right', fontVariantNumeric:'tabular-nums', color:D.charcoal }}>{fmt(r.avgAmount)}</td>
-                      <td style={{ padding:'6px 12px', fontSize:11.5, textAlign:'right', fontVariantNumeric:'tabular-nums', color: r.spike ? D.danger : D.charcoal, fontWeight: r.spike ? 600 : 400 }}>{fmt(r.lastAmount)}</td>
-                      <td style={{ padding:'6px 12px', fontSize:11.5, textAlign:'right', color:'rgba(74,74,74,0.6)', whiteSpace:'nowrap' }}>{r.lastDate}</td>
-                      <td style={{ padding:'6px 12px', textAlign:'right' }}>
-                        {r.spike && <span style={{ fontSize:9.5, fontWeight:700, color:D.danger, background:'#FDE8E8', borderRadius:3, padding:'1px 7px', whiteSpace:'nowrap' }}>↑ SPIKE</span>}
-                      </td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
-          </>
-        )}
 
         {/* ── Expenses + Revenue Trend (transaction data only) ── */}
         {hasTxnData && <>
