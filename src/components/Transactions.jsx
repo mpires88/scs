@@ -8,11 +8,13 @@ import { getSetting, setSetting } from '../lib/settings'
 import { useUnsavedChanges } from '../lib/unsavedChanges'
 import CategoryInput from './CategoryInput'
 import ImportModal from './ImportModal'
+import MultiSelect from './MultiSelect'
 import { T, fmt2 } from '../lib/theme'
 
 const PAGE_SIZE = 50        // groups per page (grouped view)
 const FLAT_PAGE_SIZE = 100  // transactions per page (ungrouped view)
 const REVIEW_STATE_KEY = 'txn_review_state'
+const AUTOSAVE_MS = 800     // quiet time after the last category edit before it's written
 
 // Sorting. Text columns read best ascending on first click, dates/numbers
 // descending (newest and largest first), so the initial direction depends on
@@ -26,6 +28,10 @@ const nextSort = (prev, col) => prev.col === col
 // Effective category of a transaction under a pending-assignments map.
 // All review state anchors to transaction IDs; group keys are display-only.
 const effCat = (assignments, t) => (t.id in assignments ? assignments[t.id] : (t.category || ''))
+
+// Stable identity of a set of pending writes, so a failed autosave isn't
+// retried until the set actually changes.
+const pendingKey = idToCat => JSON.stringify(Object.keys(idToCat).sort().map(id => [id, idToCat[id]]))
 
 // Stable serialization of the persisted review state, used both to store it
 // and to detect real changes (so the debounced write doesn't fire on no-ops).
@@ -71,7 +77,7 @@ export default function Transactions({ clientId = null, headerLeft = null, initi
   const [view,        setView]        = useState(initialFilters?.view || 'flat')  // 'grouped' | 'flat'
   const [dateFrom,    setDateFrom]    = useState(initialFilters?.from || '')
   const [dateTo,      setDateTo]      = useState(initialFilters?.to || '')
-  const [acctFilter,  setAcctFilter]  = useState('')      // '' = all accounts
+  const [acctFilter,  setAcctFilter]  = useState([])      // [] = all accounts
   const [registry,    setRegistry]    = useState([])      // client_settings 'ledger_accounts'
   const [sortGrouped, setSortGrouped] = useState({ col: 'description', dir: 'asc'  })
   const [sortFlat,    setSortFlat]    = useState({ col: 'date',        dir: 'desc' })
@@ -79,14 +85,19 @@ export default function Transactions({ clientId = null, headerLeft = null, initi
   const [selected,    setSelected]    = useState(new Set())
   const [bulkCat,     setBulkCat]     = useState('')
   const [page,        setPage]        = useState(0)
-  const [saving,      setSaving]      = useState(false)
+  const [saving,      setSaving]      = useState(false)   // any write, deletes included — gates the destructive buttons
+  const [writing,     setWriting]     = useState(false)   // a category write specifically — drives the "Saving…" status
   const [savedMsg,    setSavedMsg]    = useState('')
+  const [saveError,   setSaveError]   = useState('')
+  const [flushTick,   setFlushTick]   = useState(0)       // bumped when a write lands, so autosave re-checks what's left
   const [showImport,  setShowImport]  = useState(false)
   const [loadingMore, setLoadingMore] = useState(false)
 
   const { setDirty } = useUnsavedChanges()
   const hydratedRef  = useRef(false) // gates the persist effect until load() has applied stored state
   const lastSavedRef = useRef('')
+  const inFlightRef  = useRef(false) // a category write is on the wire
+  const failedRef    = useRef('')    // pending set whose autosave failed — waits for a new edit or Retry
 
   const allCats = useMemo(() => accounts.map(a => a.name), [accounts])
 
@@ -222,23 +233,24 @@ export default function Transactions({ clientId = null, headerLeft = null, initi
   // totals and counts describe the current selection rather than all history.
   // ISO date strings compare lexicographically, which is also chronological.
   const dateActive = !!(dateFrom || dateTo)
-  const acctActive = !!acctFilter
+  const acctActive = acctFilter.length > 0
   const catActive  = catFilter.length > 0
   // Matches the SAVED category, not the effective one: a deep link reproduces a
   // figure built from saved data, and filtering on pending edits would make
   // rows vanish from under you as you recategorize them.
-  const catSet = useMemo(() => new Set(catFilter), [catFilter])
+  const catSet  = useMemo(() => new Set(catFilter),  [catFilter])
+  const acctSet = useMemo(() => new Set(acctFilter), [acctFilter])
   const dateFiltered = useMemo(() => {
-    if (!dateFrom && !dateTo && !acctFilter && !catSet.size) return txns
+    if (!dateFrom && !dateTo && !acctSet.size && !catSet.size) return txns
     return txns.filter(t => {
       const d = t.transaction_date || ''
       if (dateFrom && d < dateFrom) return false
       if (dateTo   && d > dateTo)   return false
-      if (acctFilter && acctNameOf(t) !== acctFilter) return false
+      if (acctSet.size && !acctSet.has(acctNameOf(t))) return false
       if (catSet.size && !catSet.has((t.category || '').trim())) return false
       return true
     })
-  }, [txns, dateFrom, dateTo, acctFilter, acctNameOf, catSet])
+  }, [txns, dateFrom, dateTo, acctSet, acctNameOf, catSet])
 
   const groups = useMemo(() => {
     // Suggestion index is built from the full history, not the date window —
@@ -442,14 +454,20 @@ export default function Transactions({ clientId = null, headerLeft = null, initi
     () => groups.filter(g => statusByKey.get(g.key)?.kind === 'mixed').length,
     [groups, statusByKey]
   )
-  const pendingTxnCount = useMemo(() => {
-    let n = 0
+  // Real changes only — re-picking the saved value is a no-op. Split by whether
+  // the category is on the chart: known ones autosave; free text that isn't
+  // waits for an explicit Save, so a typo can't reach the books unconfirmed.
+  const pending = useMemo(() => {
+    const auto = {}, held = {}
     for (const [id, cat] of Object.entries(assignments)) {
       const t = txnById.get(id)
-      if (t && (cat || '') !== (t.category || '')) n++
+      if (!t || (cat || '') === (t.category || '')) continue
+      if (!cat || allCats.includes(cat)) auto[id] = cat || null
+      else held[id] = cat
     }
-    return n
-  }, [assignments, txnById])
+    return { auto, held, autoCount: Object.keys(auto).length, heldCount: Object.keys(held).length }
+  }, [assignments, txnById, allCats])
+  const pendingTxnCount = pending.autoCount + pending.heldCount
 
   // ── Unsaved-changes guards ─────────────────────────────────────────────────
 
@@ -531,25 +549,14 @@ export default function Transactions({ clientId = null, headerLeft = null, initi
 
   // ── Save ───────────────────────────────────────────────────────────────────
 
-  const doSave = async () => {
-    // Only writes that change something; re-picking the saved value is a no-op.
-    const idToCat = {}
-    for (const [id, cat] of Object.entries(assignments)) {
-      const t = txnById.get(id)
-      if (!t) continue
-      if ((cat || '') === (t.category || '')) continue
-      idToCat[id] = cat || null
-    }
-    if (!Object.keys(idToCat).length) return
-
-    // Free text is allowed (the chart of accounts is user-managed) but typos
-    // shouldn't slip into the books silently.
-    const unknown = [...new Set(Object.values(idToCat).filter(c => c && !allCats.includes(c)))]
-    if (unknown.length && !confirm(
-      `${unknown.length === 1 ? 'This category is' : 'These categories are'} not in your chart of accounts:\n\n${unknown.join('\n')}\n\nSave anyway?`
-    )) return
-
-    setSaving(true); setSavedMsg('')
+  // Writes one batch of category changes and folds the result into local
+  // state. Only the assignments still equal to what was written are cleared:
+  // an edit made while the write was on the wire stays pending for the next.
+  const persist = useCallback(async idToCat => {
+    const ids = Object.keys(idToCat)
+    if (!ids.length) return
+    inFlightRef.current = true
+    setSaving(true); setWriting(true); setSavedMsg(''); setSaveError('')
     try {
       const byCat = {}
       for (const [id, cat] of Object.entries(idToCat)) {
@@ -558,10 +565,10 @@ export default function Transactions({ clientId = null, headerLeft = null, initi
         byCat[k].push(id)
       }
       let total = 0
-      for (const [catKey, ids] of Object.entries(byCat)) {
+      for (const [catKey, catIds] of Object.entries(byCat)) {
         const catValue = catKey === '__null__' ? null : catKey
-        for (let i = 0; i < ids.length; i += 500) {
-          const batch = ids.slice(i, i + 500)
+        for (let i = 0; i < catIds.length; i += 500) {
+          const batch = catIds.slice(i, i + 500)
           const { error } = await supabase.from('bank_transactions')
             .update({ category: catValue }).eq('client_id', clientId).in('id', batch)
           if (error) throw error
@@ -569,13 +576,49 @@ export default function Transactions({ clientId = null, headerLeft = null, initi
         }
       }
       setTxns(prev => prev.map(t => t.id in idToCat ? { ...t, category: idToCat[t.id] ?? '' } : t))
-      setAssignments({})
-      setSavedMsg(`✓ ${total} transaction${total !== 1 ? 's' : ''} saved`)
+      setAssignments(prev => {
+        const next = { ...prev }
+        let changed = false
+        for (const id of ids) {
+          if (id in next && (next[id] || '') === (idToCat[id] || '')) { delete next[id]; changed = true }
+        }
+        return changed ? next : prev
+      })
+      failedRef.current = ''
+      setSavedMsg(`✓ Saved ${total} transaction${total !== 1 ? 's' : ''}`)
     } catch (e) {
-      alert('Save failed: ' + e.message)
+      failedRef.current = pendingKey(idToCat)
+      setSaveError(e.message)
     } finally {
-      setSaving(false)
+      inFlightRef.current = false
+      setSaving(false); setWriting(false)
+      setFlushTick(n => n + 1)
     }
+  }, [clientId])
+
+  // Autosave: chart-of-accounts categories are written shortly after the last
+  // edit. One write at a time — a timer that fires mid-write stands down, and
+  // the tick bump when that write lands brings it back for whatever remains.
+  // After a failure nothing retries on its own; a new edit (or Retry) does.
+  useEffect(() => {
+    if (!pending.autoCount) return
+    if (pendingKey(pending.auto) === failedRef.current) return
+    const h = setTimeout(() => { if (!inFlightRef.current) persist(pending.auto) }, AUTOSAVE_MS)
+    return () => clearTimeout(h)
+  }, [pending, flushTick, persist])
+
+  const retrySave = () => { failedRef.current = ''; setSaveError(''); setFlushTick(n => n + 1) }
+
+  // Explicit save for what autosave holds back: free text that isn't on the
+  // chart of accounts. Allowed (the chart is user-managed), but a typo
+  // shouldn't slip into the books silently.
+  const doSave = async () => {
+    if (!pending.heldCount || inFlightRef.current) return
+    const unknown = [...new Set(Object.values(pending.held))]
+    if (!confirm(
+      `${unknown.length === 1 ? 'This category is' : 'These categories are'} not in your chart of accounts:\n\n${unknown.join('\n')}\n\nSave anyway?`
+    )) return
+    await persist({ ...pending.auto, ...pending.held })
   }
 
   const acceptAll = () => {
@@ -661,7 +704,11 @@ export default function Transactions({ clientId = null, headerLeft = null, initi
             {dateFiltered.length} transaction{dateFiltered.length !== 1 ? 's' : ''}
             {(dateActive || acctActive || catActive) && (
               <> <span style={{ color: T.navy, fontWeight: 500 }}>
-                {[acctActive && acctFilter, catActive && `${catFilter.length} categor${catFilter.length !== 1 ? 'ies' : 'y'}`, dateActive && 'in range'].filter(Boolean).join(' · ')}
+                {[
+                  acctActive && (acctFilter.length === 1 ? acctFilter[0] : `${acctFilter.length} accounts`),
+                  catActive && `${catFilter.length} categor${catFilter.length !== 1 ? 'ies' : 'y'}`,
+                  dateActive && 'in range',
+                ].filter(Boolean).join(' · ')}
               </span> of {txns.length}</>
             )}
             {loadingMore && <> · <span style={{ color: T.charcoal, opacity: .6 }}>loading more…</span></>}
@@ -670,7 +717,14 @@ export default function Transactions({ clientId = null, headerLeft = null, initi
           </p>
         </div>
         <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
-          {savedMsg && <span style={s.savedMsg}>{savedMsg}</span>}
+          {writing && <span style={s.savingMsg}>Saving…</span>}
+          {!writing && saveError && (
+            <span style={s.errorMsg}>
+              Save failed: {saveError}{' '}
+              <button style={s.retryBtn} onClick={retrySave}>Retry</button>
+            </span>
+          )}
+          {!writing && !saveError && savedMsg && <span style={s.savedMsg}>{savedMsg}</span>}
           {suggCount > 0 && (
             <button style={s.btnOutline} onClick={acceptAll} title="Fills uncategorized transactions only — never overwrites an existing category">Accept all ({suggCount})</button>
           )}
@@ -683,13 +737,16 @@ export default function Transactions({ clientId = null, headerLeft = null, initi
             title={loadingMore ? 'Waiting for all transactions to load — duplicate detection needs the full list' : undefined}
             onClick={() => setShowImport(true)}
           >↑ Import CSV / PDF</button>
-          <button
-            style={{ ...s.btnPrimary, ...(pendingTxnCount === 0 || saving ? s.btnDisabled : {}) }}
-            disabled={pendingTxnCount === 0 || saving}
-            onClick={doSave}
-          >
-            {saving ? 'Saving…' : pendingTxnCount > 0 ? `Save (${pendingTxnCount})` : 'Save'}
-          </button>
+          {pending.heldCount > 0 && (
+            <button
+              style={{ ...s.btnPrimary, ...(saving ? s.btnDisabled : {}) }}
+              disabled={saving}
+              onClick={doSave}
+              title="Categories that aren't in your chart of accounts wait for an explicit save"
+            >
+              {`Save (${pending.heldCount})`}
+            </button>
+          )}
         </div>
       </header>
       {catActive && (
@@ -759,15 +816,14 @@ export default function Transactions({ clientId = null, headerLeft = null, initi
         {acctOptions.length > 1 && (
           <div style={s.dateRange}>
             <span style={s.dateLabel}>Account</span>
-            <select
-              style={{ ...s.input, maxWidth: 220 }}
+            <MultiSelect
+              options={acctOptions}
               value={acctFilter}
-              onChange={e => setAcctFilter(e.target.value)}
+              onChange={setAcctFilter}
+              noun="accounts"
+              style={{ maxWidth: 220 }}
               title="Names come from the bank and credit-card accounts on Chart of Accounts"
-            >
-              <option value="">All accounts</option>
-              {acctOptions.map(a => <option key={a} value={a}>{a}</option>)}
-            </select>
+            />
           </div>
         )}
         <div style={s.dateRange}>
@@ -1176,6 +1232,9 @@ const s = {
   h2:          { fontSize: 14, fontWeight: 600, color: T.navy, margin: '0 0 2px' },
   sub:         { fontSize: 11, color: 'rgba(74,74,74,0.65)', margin: 0 },
   savedMsg:    { fontSize: 11, color: T.success, fontWeight: 500 },
+  savingMsg:   { fontSize: 11, color: T.charcoal, opacity: .7 },
+  errorMsg:    { fontSize: 11, color: T.danger, fontWeight: 500 },
+  retryBtn:    { padding: '2px 8px', background: '#fff', color: T.danger, border: '1px solid #F5C2C2', borderRadius: 4, fontSize: 10.5, cursor: 'pointer' },
   center:      { display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', minHeight: 300, background: T.page, fontFamily: '-apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif' },
   spinner:     { width: 28, height: 28, border: `2px solid ${T.border}`, borderTopColor: T.navy, borderRadius: '50%', animation: 'spin .7s linear infinite' },
   errorBox:    { background: '#FDE8E8', border: '1px solid #F5C2C2', borderRadius: 6, padding: '10px 14px', fontSize: 11, color: '#991B1B', marginBottom: 14 },
