@@ -51,7 +51,7 @@ export default function MonthEndClose({ clientId }) {
         // remain), so unlike the dashboard this query keeps them.
         const [txnRes, sqRes, coaRes, methodVal, countsVal, closedVal] = await Promise.all([
           fetchAll(() => supabase.from('bank_transactions')
-            .select('transaction_date, amount, category, account')
+            .select('transaction_date, amount, category, description, account')
             .eq('client_id', clientId).order('transaction_date').order('id')),
           supabase.from('square_reports').select('period, gross_sales, tax_collected, fees, categories')
             .eq('client_id', clientId).order('period'),
