@@ -9,7 +9,9 @@ import { createPortal } from 'react-dom'
 // blur whose text exactly matches a known category. A stray "xyz" abandoned
 // with a click elsewhere reverts instead of becoming a pending assignment.
 // Free text (a category not in the chart of accounts) commits via Enter only.
-export default function CategoryInput({ value, onChange, categories = [], groups = null, placeholder = '— no category —', style = {} }) {
+// `onDone` fires whenever editing ends — commit, revert, or a blur that changed
+// nothing — so a host that swaps this in for a chip knows when to swap back.
+export default function CategoryInput({ value, onChange, categories = [], groups = null, placeholder = '— no category —', style = {}, autoFocus = false, onDone = null }) {
   const [open,  setOpen]  = useState(false)
   const [query, setQuery] = useState(value ?? '')
   const [prevValue, setPrevValue] = useState(value)
@@ -36,11 +38,13 @@ export default function CategoryInput({ value, onChange, categories = [], groups
     setQuery(cat)
     setOpen(false)
     if (cat !== (value ?? '')) onChange(cat)
+    onDone?.()
   }
 
   const revert = () => {
     setQuery(value ?? '')
     setOpen(false)
+    onDone?.()
   }
 
   const handleChange = e => {
@@ -60,7 +64,7 @@ export default function CategoryInput({ value, onChange, categories = [], groups
 
   const handleBlur = () => {
     const q = query.trim()
-    if (q === (value ?? '')) return
+    if (q === (value ?? '')) { setOpen(false); onDone?.(); return }
     const match = allNames.find(n => n.toLowerCase() === q.toLowerCase())
     if (match) commit(match)
     else revert()
@@ -126,6 +130,7 @@ export default function CategoryInput({ value, onChange, categories = [], groups
         onBlur={handleBlur}
         placeholder={placeholder}
         autoComplete="off"
+        autoFocus={autoFocus}
       />
 
       {open && hasItems && pos && typeof document !== 'undefined' && createPortal(
