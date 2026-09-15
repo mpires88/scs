@@ -181,7 +181,7 @@ export default function LedgerAccountsPanel({ clientId }) {
           </div>
 
           <div style={{ display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap', marginTop: 6 }}>
-            <span style={p.tiny}>Payment categories:</span>
+            <span style={p.tiny}>{e.type === 'card' ? 'Payment categories:' : 'Transfer categories:'}</span>
             {(e.boundCategories ?? []).map(c => (
               <span key={c} style={p.chip}>
                 {c}
@@ -209,8 +209,12 @@ export default function LedgerAccountsPanel({ clientId }) {
           </div>
           <div style={{ ...p.tiny, marginTop: 3 }}>
             {e.boundCategories?.length
-              ? <>Payments categorized here reduce this {e.type === 'card' ? 'card’s balance' : 'account'}. Each card needs its own — a shared category can only reduce one.</>
-              : <>None bound{e.type === 'card' ? ' — payments to this card won’t reduce its balance until one is' : ''}.</>}
+              ? (e.type === 'card'
+                ? <>Payments categorized here reduce this card’s balance. Each card needs its own — a shared category can only reduce one.</>
+                : <>Transactions categorized here are transfers into this account: money leaving checking under this category builds its balance, and money coming back reduces it. On the Transactions page these show as transfers.</>)
+              : <>None bound{e.type === 'card'
+                ? ' — payments to this card won’t reduce its balance until one is'
+                : ' — bind a category to record transfers into this account'}.</>}
           </div>
         </div>
       ))}

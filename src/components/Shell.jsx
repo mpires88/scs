@@ -64,6 +64,17 @@ function IconTag() {
   )
 }
 
+function IconStorefront() {
+  return (
+    <svg {...iconProps}>
+      <path d="M3 9l1.5-5h15L21 9" />
+      <path d="M3 9a3 3 0 0 0 6 0 3 3 0 0 0 6 0 3 3 0 0 0 6 0" />
+      <path d="M5 11v10h14V11" />
+      <path d="M10 21v-6h4v6" />
+    </svg>
+  )
+}
+
 function IconBook() {
   return (
     <svg {...iconProps}>
@@ -145,6 +156,7 @@ const NAV = [
   { group: 'Reports', href: '/year-end',     label: 'Year-End',          Icon: IconCalendar   },
   { group: 'Reports', href: '/planner',      label: 'Holiday Planner',   Icon: IconTrending   },
   { group: 'Reports', href: '/buys',         label: 'Inventory Buys',    Icon: IconTag        },
+  { group: 'Reports', href: '/vendors',      label: 'Vendors',           Icon: IconStorefront },
   { group: 'Admin',   href: '/accounts',     label: 'Chart of Accounts', Icon: IconBook       },
   { group: 'Admin',   href: '/settings',     label: 'Settings',          Icon: IconSliders    },
 ]

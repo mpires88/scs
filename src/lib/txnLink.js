@@ -8,6 +8,7 @@
 //   from  inclusive start date (YYYY-MM-DD)
 //   to    inclusive end date
 //   view  'flat' so the individual rows show, not merchant groups
+//   vendor a vendor id, or 'none' for rows with no vendor — from the Vendors page
 
 // A figure spanning many accounts (a section subtotal) would otherwise produce
 // an unusable URL. Past this the link falls back to the date range alone, which
@@ -39,13 +40,14 @@ export function columnRange(column, { year, yearly = false, columns = [] } = {})
   return year ? ymRange(`${year}-${String(column).padStart(2, '0')}`) : {}
 }
 
-export function buildTxnLink({ cats = [], q = '', from = '', to = '' } = {}) {
+export function buildTxnLink({ cats = [], q = '', from = '', to = '', vendor = '' } = {}) {
   const p = new URLSearchParams()
   const list = cats.filter(Boolean).join(',')
   if (list && list.length <= MAX_CATS_LEN) p.set('cats', list)
   else if (q) p.set('q', q)
-  if (from) p.set('from', from)
-  if (to)   p.set('to', to)
+  if (from)   p.set('from', from)
+  if (to)     p.set('to', to)
+  if (vendor) p.set('vendor', vendor)
   p.set('view', 'flat')
   return `/transactions?${p.toString()}`
 }
@@ -60,5 +62,6 @@ export function readTxnParams(searchParams) {
     from: get('from'),
     to:   get('to'),
     view: get('view') === 'flat' ? 'flat' : null,
+    vendor: get('vendor'),
   }
 }

@@ -170,3 +170,45 @@ describe('buildBalanceSheet — ledger-account registry', () => {
     })
   })
 })
+
+describe('buildBalanceSheet — feedless savings account (bank-type bound category)', () => {
+  const SAV_ACCOUNTS = [...ACCOUNTS, { name: 'Bluestone Savings', pl_section: 'Current Assets', parent: null }]
+  const REGISTRY = [
+    { key: 'checking', label: 'Freedom Checking',  type: 'bank', matches: [BANK], boundCategories: [],                    opening: null },
+    { key: 'savings',  label: 'Bluestone Savings', type: 'bank', matches: [],     boundCategories: ['Bluestone Savings'], opening: null },
+  ]
+  const txns = [
+    tx('2026-01-05', 10000, 'Owner Investment'),
+    tx('2026-01-15',  -500, 'Bluestone Savings'),   // transfer out of checking
+    tx('2026-02-10',   200, 'Bluestone Savings'),   // transfer back
+  ]
+  const bs = buildBalanceSheet({ txns, accounts: SAV_ACCOUNTS, year: 2026, registry: REGISTRY })
+  const assets = bs.sections.find(s => s.section === 'Current Assets').rows
+
+  it('builds the savings balance from transfers out of checking', () => {
+    const sav = assets.find(r => r.name === 'Cash — Bluestone Savings')
+    expect(sav.byMonth[1]).toBe(500)
+    expect(sav.byMonth[2]).toBe(300)
+    const chk = assets.find(r => r.name === 'Cash — Freedom Checking')
+    expect(chk.byMonth[1]).toBe(9500)
+    expect(chk.byMonth[2]).toBe(9700)
+  })
+
+  it('shows no standalone category line and keeps the identity', () => {
+    expect(assets.some(r => r.name === 'Bluestone Savings')).toBe(false)
+    bs.months.forEach(m => {
+      expect(bs.computed.assets.byMonth[m]).toBeCloseTo(bs.computed.liabEquity.byMonth[m], 2)
+    })
+  })
+
+  it('cancels the savings feed echo once that feed is imported too', () => {
+    const reg = [REGISTRY[0], { ...REGISTRY[1], matches: ['BLUESTONE SAVINGS'] }]
+    const withEcho = [...txns, tx('2026-01-15', 500, 'Bluestone Savings', 'BLUESTONE SAVINGS')]
+    const b = buildBalanceSheet({ txns: withEcho, accounts: SAV_ACCOUNTS, year: 2026, registry: reg })
+    const sav = b.sections.find(s => s.section === 'Current Assets').rows.find(r => r.name === 'Cash — Bluestone Savings')
+    expect(sav.byMonth[1]).toBe(500)
+    b.months.forEach(m => {
+      expect(b.computed.assets.byMonth[m]).toBeCloseTo(b.computed.liabEquity.byMonth[m], 2)
+    })
+  })
+})

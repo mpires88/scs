@@ -57,12 +57,17 @@ describe('buildTxnLink', () => {
   it('round-trips through readTxnParams', () => {
     const url = buildTxnLink({ cats: ['Rent', 'Misc'], from: '2026-01-01', to: '2026-01-31' })
     expect(readTxnParams(parse(url))).toEqual({
-      cats: ['Rent', 'Misc'], q: '', from: '2026-01-01', to: '2026-01-31', view: 'flat',
+      cats: ['Rent', 'Misc'], q: '', from: '2026-01-01', to: '2026-01-31', view: 'flat', vendor: '',
     })
+  })
+
+  it('carries a vendor filter from the Vendors page', () => {
+    expect(parse(buildTxnLink({ vendor: 'abc-123' })).get('vendor')).toBe('abc-123')
+    expect(readTxnParams(parse(buildTxnLink({ vendor: 'none' }))).vendor).toBe('none')
   })
 
   it('reads empty params without inventing filters', () => {
     expect(readTxnParams(new URLSearchParams()))
-      .toEqual({ cats: [], q: '', from: '', to: '', view: null })
+      .toEqual({ cats: [], q: '', from: '', to: '', view: null, vendor: '' })
   })
 })

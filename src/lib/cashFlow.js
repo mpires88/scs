@@ -112,9 +112,20 @@ export function buildCashFlow({ txns, accounts = [], registry = [], year, period
       .flatMap(e => e.boundCategories || [])
       .map(stripAcctNum))
 
+  // Categories the registry binds to a bank account — transfers to a savings
+  // account whose feed isn't imported. "Cash" here is the imported bank feeds,
+  // so money parked in savings has left cash: an investing outflow, and money
+  // brought back is the matching inflow. (If that feed is imported later, its
+  // own row lands in the same line with the opposite sign and they net out.)
+  const bankCats = new Set(
+    registry.filter(e => e.type === 'bank')
+      .flatMap(e => e.boundCategories || [])
+      .map(stripAcctNum))
+
   const groupOf = t => {
     const r = role(t)
     if (cardCats.has(r)) return 'Financing'
+    if (bankCats.has(r)) return 'Investing'
     return GROUP_BY_SECTION[sectionOf.get(r)] ?? 'Operating'
   }
 

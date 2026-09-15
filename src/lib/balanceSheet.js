@@ -60,8 +60,9 @@ export function buildBalanceSheet({ txns, accounts, year, registry = [], columns
   // side — the two complete decompositions whose equality is why the sheet
   // balances. Registry entries collect both sides into one bucket:
   //   account side: bank rows +amt (cash), card rows −amt (charges build debt)
-  //   category side: rows in a bound category +amt (a payment from checking,
-  //     amount −400, reduces the card's owed balance by 400)
+  //   category side: rows in a bound category — cards +amt (a payment from
+  //     checking, amount −400, reduces the card's owed balance by 400), banks
+  //     −amt (a transfer out of checking, amount −500, lands in savings as +500)
   // A transfer visible on BOTH feeds (checking payment + card credit) nets to
   // zero inside the card bucket: −(+400) from the account side cancels +400
   // from the category side — the card-feed echo drops out by construction.
@@ -92,7 +93,12 @@ export function buildBalanceSheet({ txns, accounts, year, registry = [], columns
     const cat = (t.category || '').trim()
     if (!cat) { add('__uncat__', ym, amt); return }
     const owner = boundOwner.get(stripAcctNum(cat))
-    if (owner) { add(`reg:${owner.key}`, ym, amt); return }
+    // A card's bound category is its payment: +amt, so −400 from checking pays
+    // the debt down. A bank's bound category is a transfer: cash leaving
+    // checking (−500) ARRIVES in that account, so the sign flips. Either way a
+    // row on the receiving feed itself cancels against its own account side,
+    // so importing that feed later double-counts nothing.
+    if (owner) { add(`reg:${owner.key}`, ym, owner.type === 'card' ? amt : -amt); return }
     const section = sectionOf.get(cat) ?? 'Operating Expenses'
     if (isBSSection(section)) add(`cat:${cat}`, ym, amt)
     else add('__pl__', ym, amt) // isPLSection or fallback — cumulative net income

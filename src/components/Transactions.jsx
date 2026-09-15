@@ -1,5 +1,5 @@
 import { useState, useEffect, useMemo, useCallback, useRef, Fragment } from 'react'
-import { supabase } from '../lib/supabase'
+import { supabase, isMissingSchemaError } from '../lib/supabase'
 import { normKey, buildCatIndex, suggestCat, clusterGroups } from '../lib/merchantClustering'
 import { groupStatus, buildDescCatMap } from '../lib/categorize'
 import { ALL_SECTIONS, fetchAccounts } from '../lib/chartOfAccounts'
@@ -9,6 +9,7 @@ import { useUnsavedChanges } from '../lib/unsavedChanges'
 import CategoryInput from './CategoryInput'
 import ImportModal from './ImportModal'
 import MultiSelect from './MultiSelect'
+import { fetchVendors, addVendor, findVendorByName, setVendorOnTransactions } from '../lib/vendors'
 import { T, fmt2, fmtYm, MON } from '../lib/theme'
 
 const PAGE_SIZE = 50        // groups per page (grouped view)
@@ -19,7 +20,7 @@ const AUTOSAVE_MS = 800     // quiet time after the last category edit before it
 // Sorting. Text columns read best ascending on first click, dates/numbers
 // descending (newest and largest first), so the initial direction depends on
 // the column rather than always being ascending.
-const TEXT_COLS = new Set(['description', 'category', 'account'])
+const TEXT_COLS = new Set(['description', 'category', 'account', 'vendor'])
 const cmp = (a, b) => (a < b ? -1 : a > b ? 1 : 0)
 const nextSort = (prev, col) => prev.col === col
   ? { col, dir: prev.dir === 'asc' ? 'desc' : 'asc' }
@@ -89,6 +90,10 @@ export default function Transactions({ clientId = null, headerLeft = null, initi
   const [dateTo,      setDateTo]      = useState(initialFilters?.to || '')
   const [acctFilter,  setAcctFilter]  = useState([])      // [] = all accounts
   const [registry,    setRegistry]    = useState([])      // client_settings 'ledger_accounts'
+  const [vendors,     setVendors]     = useState([])      // vendors table; [] until migration §7 has run
+  const [vendorsReady, setVendorsReady] = useState(true)  // false while bank_transactions has no vendor_id column
+  const [vendorFilter, setVendorFilter] = useState(initialFilters?.vendor || '') // a vendor id, or 'none'
+  const [bulkVendor,  setBulkVendor]  = useState('')
   const [sortGrouped, setSortGrouped] = useState({ col: 'description', dir: 'asc'  })
   const [sortFlat,    setSortFlat]    = useState({ col: 'date',        dir: 'desc' })
   const [expanded,    setExpanded]    = useState({})
@@ -128,19 +133,41 @@ export default function Transactions({ clientId = null, headerLeft = null, initi
 
   const allCats = useMemo(() => accounts.map(a => a.name), [accounts])
 
-  // COA-grouped category list for pickers
+  // Transfer categories: the ones the ledger registry binds to a BANK account
+  // (Chart of Accounts → Bank & Card Accounts). Money categorized here moved
+  // between your own accounts — it never touches the P&L, and the balance
+  // sheet carries it to the receiving account. A card's payment category is a
+  // payment, not a transfer, so it stays under its own section.
+  const transferCats = useMemo(
+    () => registry.filter(e => e.type === 'bank')
+      .flatMap(e => e.boundCategories || [])
+      .filter(c => allCats.includes(c)),
+    [registry, allCats]
+  )
+  const transferSet = useMemo(() => new Set(transferCats), [transferCats])
+  const transferLabelOf = useCallback(
+    c => registry.find(e => (e.boundCategories || []).includes(c))?.label ?? c,
+    [registry]
+  )
+
+  // COA-grouped category list for pickers, transfers first so "mark as a
+  // transfer" is one pick away.
   const groupedCats = useMemo(() => {
     if (!accounts.length) return null
     const bySection = {}
     accounts.forEach(a => {
+      if (transferSet.has(a.name)) return
       const sec = a.pl_section ?? 'Other'
       if (!bySection[sec]) bySection[sec] = []
       bySection[sec].push(a.name)
     })
     const ordered = ALL_SECTIONS.filter(s => bySection[s]?.length).map(s => ({ section: s, accounts: bySection[s] }))
     if (bySection['Other']?.length) ordered.push({ section: 'Other', accounts: bySection['Other'] })
+    if (transferCats.length) ordered.unshift({ section: 'Transfers', accounts: transferCats })
     return ordered.length ? ordered : null
-  }, [accounts])
+  }, [accounts, transferCats, transferSet])
+
+  const vendorNames = useMemo(() => vendors.map(v => v.name), [vendors])
 
   // ── Load ───────────────────────────────────────────────────────────────────
 
@@ -149,22 +176,36 @@ export default function Transactions({ clientId = null, headerLeft = null, initi
     try {
       // The .order('id') tiebreaker makes .range() pagination stable — without a
       // total order, Postgres may repeat or skip rows across pages.
-      const base = opts => supabase
+      const COLS = 'id, transaction_date, description, amount, category, account, reference_id'
+      const mkBase = cols => opts => supabase
         .from('bank_transactions')
-        .select('id, transaction_date, description, amount, category, account, reference_id', opts)
+        .select(cols, opts)
         .eq('client_id', clientId)
         .order('transaction_date')
         .order('id')
+      let base = mkBase(`${COLS}, vendor_id`)
 
       // count:'exact' rides along on the first page so the remaining pages are
       // known up front and can be fetched in parallel, not one after another.
-      const [firstRes, coaRes, reviewState, ledgerVal] = await Promise.all([
+      const [firstTry, coaRes, reviewState, ledgerVal, vendorRows] = await Promise.all([
         base({ count: 'exact' }).range(0, 999),
         fetchAccounts(clientId),
         getSetting(clientId, REVIEW_STATE_KEY, null).catch(() => null),
         getSetting(clientId, 'ledger_accounts', []).catch(() => []),
+        fetchVendors(clientId).catch(() => []), // no vendors table yet just means no vendors
       ])
+      // Until migration §7 adds vendor_id, load without it and hide the column
+      // rather than failing the whole page.
+      let firstRes = firstTry
+      let withVendors = true
+      if (firstRes.error && isMissingSchemaError(firstRes.error)) {
+        withVendors = false
+        base = mkBase(COLS)
+        firstRes = await base({ count: 'exact' }).range(0, 999)
+      }
       if (firstRes.error) throw firstRes.error
+      setVendorsReady(withVendors)
+      setVendors(withVendors ? vendorRows : [])
 
       const first = firstRes.data ?? []
       const total = firstRes.count ?? first.length
@@ -239,6 +280,9 @@ export default function Transactions({ clientId = null, headerLeft = null, initi
 
   const txnById = useMemo(() => new Map(txns.map(t => [t.id, t])), [txns])
 
+  const vendorById   = useMemo(() => new Map(vendors.map(v => [v.id, v])), [vendors])
+  const vendorNameOf = useCallback(t => vendorById.get(t.vendor_id)?.name || '', [vendorById])
+
   const catOf = useCallback(t => effCat(assignments, t), [assignments])
 
   // A transaction's account as the Chart of Accounts names it. Feed labels come
@@ -268,16 +312,17 @@ export default function Transactions({ clientId = null, headerLeft = null, initi
   const catSet  = useMemo(() => new Set(catFilter),  [catFilter])
   const acctSet = useMemo(() => new Set(acctFilter), [acctFilter])
   const dateFiltered = useMemo(() => {
-    if (!dateFrom && !dateTo && !acctSet.size && !catSet.size) return txns
+    if (!dateFrom && !dateTo && !acctSet.size && !catSet.size && !vendorFilter) return txns
     return txns.filter(t => {
       const d = t.transaction_date || ''
       if (dateFrom && d < dateFrom) return false
       if (dateTo   && d > dateTo)   return false
       if (acctSet.size && !acctSet.has(acctNameOf(t))) return false
       if (catSet.size && !catSet.has((t.category || '').trim())) return false
+      if (vendorFilter && (vendorFilter === 'none' ? !!t.vendor_id : t.vendor_id !== vendorFilter)) return false
       return true
     })
-  }, [txns, dateFrom, dateTo, acctSet, acctNameOf, catSet])
+  }, [txns, dateFrom, dateTo, acctSet, acctNameOf, catSet, vendorFilter])
 
   const groups = useMemo(() => {
     // Suggestion index is built from the full history, not the date window —
@@ -387,7 +432,7 @@ export default function Transactions({ clientId = null, headerLeft = null, initi
   // Selection is keyed by group key in grouped view and by transaction id in
   // flat view, so it must not survive anything that regroups or switches view;
   // it deliberately does survive page changes.
-  useEffect(() => { setPage(0); setSelected(new Set()) }, [search, filter, fuzzy, view, dateFrom, dateTo, acctFilter, catFilter])
+  useEffect(() => { setPage(0); setSelected(new Set()) }, [search, filter, fuzzy, view, dateFrom, dateTo, acctFilter, catFilter, vendorFilter])
   useEffect(() => { setPage(0) }, [sortGrouped, sortFlat])
 
   const visibleGroups = useMemo(() => {
@@ -397,7 +442,7 @@ export default function Transactions({ clientId = null, headerLeft = null, initi
       // a group matches if ANY of its rows does — a mixed group would otherwise
       // vanish when searching for one of the categories inside it.
       if (q && !g.key.includes(q) && !g.displayDesc.toLowerCase().includes(q)
-        && !g.txns.some(t => catOf(t).toLowerCase().includes(q))) return false
+        && !g.txns.some(t => catOf(t).toLowerCase().includes(q) || vendorNameOf(t).toLowerCase().includes(q))) return false
       const st = statusByKey.get(g.key)
       if (filter === 'uncategorized' && st.uncategorized === 0) return false
       if (filter === 'categorized'   && st.uncategorized > 0)   return false
@@ -405,7 +450,7 @@ export default function Transactions({ clientId = null, headerLeft = null, initi
       if (filter === 'suggestions'   && !hasSugg(g))            return false
       return true
     })
-  }, [groups, search, filter, statusByKey, hasSugg, catOf])
+  }, [groups, search, filter, statusByKey, hasSugg, catOf, vendorNameOf])
 
   const sortedGroups = useMemo(() => {
     const { col, dir } = sortGrouped
@@ -438,7 +483,8 @@ export default function Transactions({ clientId = null, headerLeft = null, initi
     return dateFiltered.filter(t => {
       const cat = catOf(t)
       if (q && !(t.description || '').toLowerCase().includes(q)
-        && !cat.toLowerCase().includes(q)) return false
+        && !cat.toLowerCase().includes(q)
+        && !vendorNameOf(t).toLowerCase().includes(q)) return false
       const c = cat
       const meta = txnMeta.get(t.id)
       if (filter === 'uncategorized' && c)  return false
@@ -447,7 +493,7 @@ export default function Transactions({ clientId = null, headerLeft = null, initi
       if (filter === 'suggestions'   && !(meta?.sugg && !c && !rejected.has(t.id))) return false
       return true
     })
-  }, [dateFiltered, search, filter, catOf, txnMeta, rejected])
+  }, [dateFiltered, search, filter, catOf, txnMeta, rejected, vendorNameOf])
 
   const sortedTxns = useMemo(() => {
     const { col, dir } = sortFlat
@@ -457,12 +503,13 @@ export default function Transactions({ clientId = null, headerLeft = null, initi
         case 'description': return (t.description || '').toLowerCase()
         case 'category':    return catOf(t).toLowerCase()
         case 'account':     return (t.account || '').toLowerCase()
+        case 'vendor':      return vendorNameOf(t).toLowerCase()
         case 'amount':      return Number(t.amount) || 0
         default:            return t.transaction_date || ''
       }
     }
     return [...visibleTxns].sort((a, b) => mul * cmp(val(a), val(b)) || cmp(a.id, b.id))
-  }, [visibleTxns, sortFlat, catOf])
+  }, [visibleTxns, sortFlat, catOf, vendorNameOf])
 
   const onSortGrouped = col => setSortGrouped(p => nextSort(p, col))
   const onSortFlat    = col => setSortFlat(p => nextSort(p, col))
@@ -685,8 +732,7 @@ export default function Transactions({ clientId = null, headerLeft = null, initi
       : [...selected].flatMap(k => groups.find(g => g.key === k)?.txns ?? [])
   ), [isFlat, selected, txnById, groups])
 
-  const applyBulk = () => {
-    const cat = bulkCat.trim()
+  const applyBulkCat = cat => {
     if (!selected.size || !cat) return
     setAssignments(p => {
       const next = { ...p }
@@ -694,6 +740,43 @@ export default function Transactions({ clientId = null, headerLeft = null, initi
       return next
     })
     setSelected(new Set()); setBulkCat(''); setSavedMsg('')
+  }
+  const applyBulk = () => applyBulkCat(bulkCat.trim())
+
+  // ── Vendors ────────────────────────────────────────────────────────────────
+
+  // `name` is whatever the picker committed: an existing vendor, a brand-new
+  // one (created here on the spot), or '' to clear. Written immediately — a
+  // vendor is a label on the row, not a figure on the books, so nothing
+  // needs the category autosave's hold-back rules.
+  const assignVendor = async (ids, name) => {
+    const clean = (name || '').trim()
+    try {
+      let vendor = null
+      if (clean) {
+        vendor = findVendorByName(vendors, clean)
+        if (!vendor) {
+          vendor = await addVendor(clientId, clean)
+          setVendors(prev => prev.some(v => v.id === vendor.id)
+            ? prev
+            : [...prev, vendor].sort((a, b) => a.name.localeCompare(b.name)))
+        }
+      }
+      const vid = vendor?.id ?? null
+      await setVendorOnTransactions(clientId, ids, vid)
+      const idSet = new Set(ids)
+      setTxns(prev => prev.map(t => idSet.has(t.id) ? { ...t, vendor_id: vid } : t))
+      setSavedMsg(vendor
+        ? `Vendor set to ${vendor.name} on ${ids.length} transaction${ids.length !== 1 ? 's' : ''}`
+        : `Vendor cleared on ${ids.length} transaction${ids.length !== 1 ? 's' : ''}`)
+    } catch (e) { alert('Could not save vendor: ' + e.message) }
+  }
+
+  const applyBulkVendor = () => {
+    const ts = selectedTxns()
+    if (!ts.length || !bulkVendor.trim()) return
+    assignVendor(ts.map(t => t.id), bulkVendor)
+    setSelected(new Set()); setBulkVendor('')
   }
 
   const clearBulkCats = () => {
@@ -730,10 +813,14 @@ export default function Transactions({ clientId = null, headerLeft = null, initi
   const pctDone     = total ? (catTxnCount / total) * 100 : 0
   const pctSugg     = total ? (suggTxnCount / total) * 100 : 0
   const pctOpen     = Math.max(0, 100 - pctDone - pctSugg)
-  const anyFilter   = dateActive || acctActive || catActive
+  const vendorFilterLabel = !vendorFilter ? ''
+    : vendorFilter === 'none' ? 'no vendor'
+    : (vendorById.get(vendorFilter)?.name || 'one vendor')
+  const anyFilter   = dateActive || acctActive || catActive || !!vendorFilter
   const scope = [
     acctActive && (acctFilter.length === 1 ? acctFilter[0] : `${acctFilter.length} accounts`),
     catActive  && `${catFilter.length} categor${catFilter.length !== 1 ? 'ies' : 'y'}`,
+    vendorFilter && vendorFilterLabel,
     dateActive && `${dateFrom ? fmtDate(dateFrom) : 'start'} – ${dateTo ? fmtDate(dateTo) : 'now'}`,
   ].filter(Boolean).join(' · ')
   const rowFirst = rowCount === 0 ? 0 : page * pageSize + 1
@@ -791,14 +878,19 @@ export default function Transactions({ clientId = null, headerLeft = null, initi
           ]} />
         </div>
       </header>
-      {catActive && (
+      {(catActive || vendorFilter) && (
         <div style={s.linkBanner}>
           <span>
-            Showing <strong>{catFilter.join(', ')}</strong>
+            Showing{' '}
+            {catActive && <strong>{catFilter.join(', ')}</strong>}
+            {catActive && vendorFilter && ' · '}
+            {vendorFilter && (vendorFilter === 'none'
+              ? <>transactions with <strong>no vendor</strong></>
+              : <>vendor <strong>{vendorFilterLabel}</strong></>)}
             {dateActive && <> from <strong>{dateFrom || 'the start'}</strong> to <strong>{dateTo || 'now'}</strong></>}
-            {' '}— linked from a report.
+            {' '}— linked from {vendorFilter ? 'the Vendors page' : 'a report'}.
           </span>
-          <button onClick={() => { setCatFilter([]); setDateFrom(''); setDateTo('') }} style={s.linkClear}>Clear filter</button>
+          <button onClick={() => { setCatFilter([]); setVendorFilter(''); setDateFrom(''); setDateTo('') }} style={s.linkClear}>Clear filter</button>
         </div>
       )}
 
@@ -919,7 +1011,8 @@ export default function Transactions({ clientId = null, headerLeft = null, initi
               <table className="scs-tbl" style={s.table}>
                 <colgroup>
                   <col style={{ width: 34 }} /><col style={{ width: 112 }} /><col />
-                  <col style={{ width: 300 }} /><col style={{ width: 120 }} /><col style={{ width: 150 }} />
+                  <col style={{ width: 300 }} />{vendorsReady && <col style={{ width: 180 }} />}
+                  <col style={{ width: 120 }} /><col style={{ width: 150 }} />
                 </colgroup>
                 <thead>
                   <tr>
@@ -929,6 +1022,7 @@ export default function Transactions({ clientId = null, headerLeft = null, initi
                     <SortTh col="date"        label="Date"        sort={sortFlat} onSort={onSortFlat} />
                     <SortTh col="description" label="Description" sort={sortFlat} onSort={onSortFlat} />
                     <th style={s.th}>Category</th>
+                    {vendorsReady && <SortTh col="vendor" label="Vendor" sort={sortFlat} onSort={onSortFlat} />}
                     <SortTh col="amount"      label="Amount"      sort={sortFlat} onSort={onSortFlat} align="right" />
                     <SortTh col="account"     label="Account"     sort={sortFlat} onSort={onSortFlat} />
                   </tr>
@@ -967,11 +1061,24 @@ export default function Transactions({ clientId = null, headerLeft = null, initi
                             suggestion={sugg}
                             onAccept={() => acceptTxnSuggestion(t.id, sugg)}
                             onReject={() => rejectTxnSuggestion(t.id)}
+                            transfer={transferSet.has(cat)}
                             onChange={val => assignTxn(t.id, val)}
                             categories={allCats}
                             groups={groupedCats}
                           />
                         </td>
+                        {vendorsReady && (
+                          <td style={{ ...s.td, ...s.tdCat }}>
+                            <CategoryChip
+                              value={vendorNameOf(t)}
+                              emptyLabel="Set vendor…"
+                              placeholder="— no vendor —"
+                              title="Pick a vendor, or type a new name and press Enter to add one"
+                              onChange={val => assignVendor([t.id], val)}
+                              categories={vendorNames}
+                            />
+                          </td>
+                        )}
                         <td style={{ ...s.td, ...s.tdAmt, ...(amt > 0 ? s.credit : {}) }}>{amt > 0 ? '+' : ''}{fmt2(amt)}</td>
                         <td style={{ ...s.td, ...s.tdAcct }} title={t.account || undefined}>{t.account || '—'}</td>
                       </tr>
@@ -983,7 +1090,8 @@ export default function Transactions({ clientId = null, headerLeft = null, initi
               <table className="scs-tbl" style={s.table}>
                 <colgroup>
                   <col style={{ width: 34 }} /><col style={{ width: 26 }} /><col />
-                  <col style={{ width: 300 }} /><col style={{ width: 60 }} /><col style={{ width: 120 }} /><col style={{ width: 116 }} />
+                  <col style={{ width: 300 }} />{vendorsReady && <col style={{ width: 180 }} />}
+                  <col style={{ width: 60 }} /><col style={{ width: 120 }} /><col style={{ width: 116 }} />
                 </colgroup>
                 <thead>
                   <tr>
@@ -993,6 +1101,7 @@ export default function Transactions({ clientId = null, headerLeft = null, initi
                     <th style={s.th} aria-label="Expand" />
                     <SortTh col="description" label="Merchant" sort={sortGrouped} onSort={onSortGrouped} />
                     <th style={s.th}>Category</th>
+                    {vendorsReady && <th style={s.th}>Vendor</th>}
                     <SortTh col="count"       label="Txns"     sort={sortGrouped} onSort={onSortGrouped} align="right" />
                     <SortTh col="total"       label="Total"    sort={sortGrouped} onSort={onSortGrouped} align="right" />
                     <SortTh col="last"        label="Last"     sort={sortGrouped} onSort={onSortGrouped} title="Sort by most recent transaction" />
@@ -1008,6 +1117,9 @@ export default function Transactions({ clientId = null, headerLeft = null, initi
                     const isExp   = !!expanded[g.key]
                     const isSel   = selected.has(g.key)
                     const n       = g.txns.length
+                    const vIds    = new Set(g.txns.map(t => t.vendor_id || ''))
+                    const vMixed  = vIds.size > 1
+                    const vName   = vMixed ? '' : (vendorById.get([...vIds][0])?.name || '')
 
                     return (
                       <Fragment key={g.key}>
@@ -1060,11 +1172,26 @@ export default function Transactions({ clientId = null, headerLeft = null, initi
                               title={n > 1 ? `Applies to all ${n} transactions in this group` : undefined}
                               onAccept={() => acceptSuggestion(g)}
                               onReject={() => rejectSuggestion(g)}
+                              transfer={transferSet.has(cat)}
                               onChange={val => assignGroup(g, val)}
                               categories={allCats}
                               groups={groupedCats}
                             />
                           </td>
+                          {vendorsReady && (
+                            <td style={{ ...s.td, ...s.tdCat }}>
+                              <CategoryChip
+                                value={vName}
+                                mixed={vMixed}
+                                mixedLabel={`Mixed — set to overwrite all ${n}`}
+                                emptyLabel={n > 1 ? `Set vendor for ${n}…` : 'Set vendor…'}
+                                placeholder="— no vendor —"
+                                title={n > 1 ? `Applies to all ${n} transactions in this group. Type a new name and press Enter to add a vendor.` : 'Pick a vendor, or type a new name and press Enter to add one'}
+                                onChange={val => assignVendor(g.txns.map(t => t.id), val)}
+                                categories={vendorNames}
+                              />
+                            </td>
+                          )}
                           <td style={{ ...s.td, ...s.tdNum }}>{n}</td>
                           <td style={{ ...s.td, ...s.tdAmt, ...(g.total > 0 ? s.credit : {}) }}>{g.total > 0 ? '+' : ''}{fmt2(g.total)}</td>
                           <td style={{ ...s.td, ...s.tdLast }}>{fmtDate(lastOf(g))}</td>
@@ -1075,7 +1202,7 @@ export default function Transactions({ clientId = null, headerLeft = null, initi
                           <>
                             {g.variants?.length > 0 && (
                               <tr className="sub">
-                                <td colSpan={7} style={s.subHead} title={[g.displayDesc, ...g.variants].join('\n')}>
+                                <td colSpan={vendorsReady ? 8 : 7} style={s.subHead} title={[g.displayDesc, ...g.variants].join('\n')}>
                                   <b>Grouped descriptions:</b> {[g.displayDesc, ...g.variants].join(' · ')}
                                 </td>
                               </tr>
@@ -1097,6 +1224,7 @@ export default function Transactions({ clientId = null, headerLeft = null, initi
                                     {tDirty && <span style={{ ...s.dirtyDot, marginRight: 6 }} title="Unsaved change" />}
                                     {tc || 'uncategorized'}
                                   </td>
+                                  {vendorsReady && <td style={{ ...s.subTd, color: '#6B6560' }}>{vendorNameOf(t)}</td>}
                                   <td style={s.subTd} />
                                   <td style={{ ...s.subTd, ...s.tdAmt, ...(ta > 0 ? s.credit : {}) }}>{ta > 0 ? '+' : ''}{fmt2(ta)}</td>
                                   <td style={s.subTd}>
@@ -1111,7 +1239,7 @@ export default function Transactions({ clientId = null, headerLeft = null, initi
                             })}
                             {n > 25 && (
                               <tr className="sub">
-                                <td colSpan={7} style={{ ...s.subTd, ...s.subDesc, color: '#8A857D' }}>…and {n - 25} more</td>
+                                <td colSpan={vendorsReady ? 8 : 7} style={{ ...s.subTd, ...s.subDesc, color: '#8A857D' }}>…and {n - 25} more</td>
                               </tr>
                             )}
                           </>
@@ -1145,6 +1273,27 @@ export default function Transactions({ clientId = null, headerLeft = null, initi
                   onClick={applyBulk}
                 >Apply</button>
                 <button style={s.bulkBtn} onClick={clearBulkCats}>Clear categories</button>
+                {transferCats.map(c => (
+                  <button key={c} style={s.bulkBtn} onClick={() => applyBulkCat(c)} title={`Categorize the selection as a transfer to ${transferLabelOf(c)} — kept off the P&L`}>
+                    ⇄ Transfer to {transferLabelOf(c)}
+                  </button>
+                ))}
+                {vendorsReady && (
+                  <>
+                    <span style={s.bulkDivider} />
+                    <input
+                      style={{ ...s.bulkInput, width: 170 }}
+                      list="bulk-vendors"
+                      value={bulkVendor}
+                      onChange={e => setBulkVendor(e.target.value)}
+                      onKeyDown={e => { if (e.key === 'Enter') applyBulkVendor() }}
+                      placeholder="Vendor…"
+                      aria-label="Vendor to set on the selection"
+                    />
+                    <datalist id="bulk-vendors">{vendorNames.map(n => <option key={n} value={n} />)}</datalist>
+                    <button style={{ ...s.bulkBtn, ...(!bulkVendor.trim() ? s.btnDisabled : {}) }} disabled={!bulkVendor.trim()} onClick={applyBulkVendor} title="A name that isn't on the vendor list yet is added to it">Set vendor</button>
+                  </>
+                )}
                 <button style={{ ...s.bulkBtnDanger, ...(saving ? s.btnDisabled : {}) }} disabled={saving} onClick={deleteSelected}>Delete</button>
                 <button style={s.bulkBtnLink} onClick={() => setSelected(new Set())}>Deselect</button>
               </div>
@@ -1209,7 +1358,8 @@ function SortTh({ col, label, sort, onSort, align, title }) {
 // blur rules all stay exactly as CategoryInput defines them.
 function CategoryChip({
   value, dirty = false, unknown = false, suggestion = '', mixed = false, mixedLabel = 'Mixed',
-  title, onAccept, onReject, onChange, categories, groups,
+  transfer = false, emptyLabel = 'Set category…', placeholder,
+  title, onAccept, onReject, onChange, categories, groups = null,
 }) {
   const [editing, setEditing] = useState(false)
   const btnRef     = useRef(null)
@@ -1231,7 +1381,7 @@ function CategoryChip({
       onChange={onChange}
       categories={categories}
       groups={groups}
-      placeholder={mixed ? '— mixed categories —' : undefined}
+      placeholder={mixed ? '— mixed —' : placeholder}
       autoFocus
       onDone={() => setEditing(false)}
     />
@@ -1248,14 +1398,17 @@ function CategoryChip({
     </span>
   )
 
-  const variant = mixed ? s.chipMixed : !value ? s.chipEmpty : unknown ? s.chipUnknown : dirty ? s.chipDirty : {}
-  const label   = mixed ? mixedLabel : (value || 'Set category…')
+  const variant = mixed ? s.chipMixed : !value ? s.chipEmpty : unknown ? s.chipUnknown : transfer ? s.chipTransfer : {}
+  const ring    = dirty && !mixed ? s.chipDirty : {}
+  const label   = mixed ? mixedLabel : (value || emptyLabel)
   const hint    = unknown ? 'Not in your chart of accounts — waits for Save'
     : dirty ? 'Unsaved change — writes in a moment'
+    : transfer && value ? 'Transfer between your own accounts — kept off the P&L'
     : title
   return (
-    <button type="button" ref={btnRef} className="scs-chip" style={{ ...s.chip, ...variant }} onClick={() => setEditing(true)} title={hint}>
+    <button type="button" ref={btnRef} className="scs-chip" style={{ ...s.chip, ...variant, ...ring }} onClick={() => setEditing(true)} title={hint}>
       {dirty && !mixed && <span style={s.dirtyDot} />}
+      {transfer && value && !mixed && <span style={s.transferMark} aria-label="Transfer">⇄</span>}
       {unknown && <span style={s.unkMark}>!</span>}
       <span style={s.chipText}>{label}</span>
       <span style={s.chipCaret}>▼</span>
@@ -1447,7 +1600,7 @@ const s = {
 
   // table
   tableWrap:   { border: `1px solid ${T.border}`, borderRadius: 6, background: '#fff', overflowX: 'auto' },
-  table:       { width: '100%', borderCollapse: 'collapse', tableLayout: 'fixed', minWidth: 900 },
+  table:       { width: '100%', borderCollapse: 'collapse', tableLayout: 'fixed', minWidth: 1040 },
   th:          { background: T.page, padding: '7px 10px', textAlign: 'left', fontWeight: 700, borderBottom: `2px solid ${T.border}`, fontSize: 9.5, color: T.gold, textTransform: 'uppercase', letterSpacing: '.06em', whiteSpace: 'nowrap' },
   thCk:        { textAlign: 'center', padding: 0 },
   td:          { padding: '0 10px', height: 38, borderBottom: '1px solid #EEECE6', verticalAlign: 'middle', fontSize: 12, color: T.charcoal, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' },
@@ -1485,6 +1638,8 @@ const s = {
   chipDirty:   { borderColor: T.navy, boxShadow: '0 0 0 2px #C9DAEA' },
   chipUnknown: { borderColor: '#E4B95A', background: '#FFF6DC', color: '#7A5A0E' },
   chipMixed:   { borderStyle: 'dashed', color: '#6B6560' },
+  chipTransfer:{ borderColor: '#B8CDE0', background: '#EBF1F7', color: T.navy },
+  transferMark:{ fontSize: 12, lineHeight: 1, color: T.steel, flexShrink: 0 },
   unkMark:     { fontWeight: 800, fontSize: 10, color: T.amber, flexShrink: 0 },
   chipSugg:    { display: 'inline-flex', alignItems: 'center', gap: 4, height: 24, maxWidth: '100%', padding: '0 4px 0 0', borderRadius: 5, border: `1px dashed ${T.gold}`, background: '#F6F1E3', whiteSpace: 'nowrap', verticalAlign: 'middle' },
   chipSuggMain:{ display: 'inline-flex', alignItems: 'center', gap: 6, minWidth: 0, height: 22, padding: '0 6px 0 9px', border: 0, borderRadius: 4, background: 'transparent', color: '#5C4D17', fontSize: 11.5, cursor: 'pointer', fontFamily: 'inherit', textAlign: 'left' },

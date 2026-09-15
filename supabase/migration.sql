@@ -109,3 +109,27 @@ begin
       alter column client_id type uuid using client_id::uuid;
   end if;
 end $$;
+
+-- ── 7. Vendors ───────────────────────────────────────────────────────────────
+-- Who SCS buys from. A transaction points at one vendor (or none); deleting a
+-- vendor unassigns its transactions rather than deleting them.
+create table if not exists public.vendors (
+  id         uuid        primary key default gen_random_uuid(),
+  client_id  uuid        not null,
+  name       text        not null,
+  notes      text,
+  created_at timestamptz not null default now()
+);
+-- Case-insensitive uniqueness: "Costco" and "COSTCO" are one vendor.
+create unique index if not exists vendors_client_name_key
+  on public.vendors (client_id, lower(name));
+
+alter table public.bank_transactions
+  add column if not exists vendor_id uuid references public.vendors(id) on delete set null;
+create index if not exists bank_transactions_client_vendor_idx
+  on public.bank_transactions (client_id, vendor_id);
+
+alter table public.vendors enable row level security;
+drop policy if exists "authenticated full access" on public.vendors;
+create policy "authenticated full access" on public.vendors
+  for all to authenticated using (true) with check (true);

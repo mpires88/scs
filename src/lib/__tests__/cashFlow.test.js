@@ -172,3 +172,24 @@ describe('GROUP_BY_SECTION', () => {
       .forEach(s => expect(GROUP_BY_SECTION[s]).toBeTruthy())
   })
 })
+
+describe('buildCashFlow — transfers to a feedless savings account', () => {
+  const reg   = [...REGISTRY, { key: 'sav', type: 'bank', label: 'Savings', matches: [], boundCategories: ['Savings Transfer'] }]
+  const accts = [...ACCOUNTS, { name: 'Savings Transfer', pl_section: 'Current Assets' }]
+  const cf = buildCashFlow({
+    txns: [
+      tx('2026-01-10', 1000, '1100 Square Deposits'),
+      tx('2026-01-15', -500, 'Savings Transfer'),   // parked in savings
+      tx('2026-02-03',  200, 'Savings Transfer'),   // brought back
+    ],
+    accounts: accts, registry: reg, year: 2026,
+  })
+
+  it('routes them to investing, not operating', () => {
+    expect(sec(cf, 'Investing').rows.map(r => r.name)).toEqual(['Savings Transfer'])
+    expect(sec(cf, 'Investing').total).toBe(-300)
+    expect(sec(cf, 'Operating').total).toBe(1000)
+    expect(cf.unexplained).toBe(0)
+    expect(cf.reconciles).toBe(true)
+  })
+})
