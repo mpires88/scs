@@ -1563,7 +1563,10 @@ const s = {
 
   // stat tiles + progress
   stats:       { display: 'flex', alignItems: 'stretch', gap: 8, flexWrap: 'wrap', marginBottom: 12 },
-  stat:        { display: 'flex', flexDirection: 'column', gap: 1, minWidth: 110, padding: '8px 12px', border: `1px solid ${T.border}`, background: '#fff', borderRadius: 6, textAlign: 'left', cursor: 'pointer', fontFamily: 'inherit' },
+  // Longhand border properties, not the shorthand: the variants below override
+  // borderColor/borderStyle, and React warns when a longhand is dropped on
+  // re-render while a shorthand for the same property is still set.
+  stat:        { display: 'flex', flexDirection: 'column', gap: 1, minWidth: 110, padding: '8px 12px', borderWidth: 1, borderStyle: 'solid', borderColor: T.border, background: '#fff', borderRadius: 6, textAlign: 'left', cursor: 'pointer', fontFamily: 'inherit' },
   statOn:      { borderColor: T.navy, boxShadow: `inset 0 0 0 1px ${T.navy}`, background: '#EBF1F7' },
   statLabel:   { fontSize: 9.5, fontWeight: 700, letterSpacing: '.06em', textTransform: 'uppercase', color: T.gold, whiteSpace: 'nowrap' },
   statNum:     { fontSize: 18, fontWeight: 600, fontVariantNumeric: 'tabular-nums', lineHeight: 1.2 },
@@ -1631,7 +1634,7 @@ const s = {
   rejoinBtn:   { padding: '2px 8px', background: '#EBF1F7', color: T.navy, border: '1px solid #B8CDE0', borderRadius: 3, fontSize: 10, fontWeight: 500, cursor: 'pointer' },
 
   // category chips
-  chip:        { display: 'inline-flex', alignItems: 'center', gap: 6, height: 24, maxWidth: '100%', padding: '0 9px', borderRadius: 5, border: `1px solid ${T.border}`, background: '#fff', fontSize: 11.5, color: INK, cursor: 'pointer', fontFamily: 'inherit', textAlign: 'left', whiteSpace: 'nowrap', verticalAlign: 'middle' },
+  chip:        { display: 'inline-flex', alignItems: 'center', gap: 6, height: 24, maxWidth: '100%', padding: '0 9px', borderRadius: 5, borderWidth: 1, borderStyle: 'solid', borderColor: T.border, background: '#fff', fontSize: 11.5, color: INK, cursor: 'pointer', fontFamily: 'inherit', textAlign: 'left', whiteSpace: 'nowrap', verticalAlign: 'middle' },
   chipText:    { overflow: 'hidden', textOverflow: 'ellipsis', minWidth: 0 },
   chipCaret:   { fontSize: 8, opacity: .4, flexShrink: 0 },
   chipEmpty:   { borderStyle: 'dashed', borderColor: '#F0D9A6', background: '#FFFBF1', color: '#B45309' },

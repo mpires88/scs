@@ -61,9 +61,12 @@ export default function MultiSelect({ options, value, onChange, noun = 'items', 
   )
 }
 
+// Longhand border, not the shorthand: `triggerActive` overrides borderColor,
+// and React warns when a longhand disappears on re-render while a shorthand
+// for the same property is still set.
 const trigger = {
   display: 'inline-flex', alignItems: 'center', maxWidth: '100%', padding: '5px 9px',
-  border: `1px solid ${T.border}`, borderRadius: 5, fontSize: 11, color: T.charcoal,
+  borderWidth: 1, borderStyle: 'solid', borderColor: T.border, borderRadius: 5, fontSize: 11, color: T.charcoal,
   background: '#fff', cursor: 'pointer', textAlign: 'left', lineHeight: 'normal',
 }
 const triggerActive = { borderColor: T.navy, color: T.navy, fontWeight: 500 }
