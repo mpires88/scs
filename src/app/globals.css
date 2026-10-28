@@ -22,3 +22,20 @@ html, body {
 body {
   background: #f8fafc;
 }
+
+@media print {
+  /* Statement tables sit in a horizontal scroller on screen. A scroll box can't
+     be split across pages, so in print it would be pushed whole onto the next
+     page (leaving a blank one behind) and anything wider than the paper would
+     be cut off. Let the table flow instead. */
+  .stmt-scroll {
+    display: block !important;
+    overflow: visible !important;
+    max-width: none !important;
+    width: max-content;
+  }
+  main { overflow: visible !important; }
+  /* Never split a line of a statement across pages; repeat the column header. */
+  tr { break-inside: avoid; }
+  thead { display: table-header-group; }
+}

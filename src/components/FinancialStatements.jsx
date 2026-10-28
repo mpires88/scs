@@ -19,6 +19,7 @@ import ReportsPL from './ReportsPL'
 import ReportsBS from './ReportsBS'
 import ReportsCF from './ReportsCF'
 import { DisclosureBanner } from './Disclosure'
+import StatementsCover from './StatementsCover'
 import { T } from '../lib/theme'
 
 const SECTIONS = [
@@ -40,7 +41,7 @@ export default function FinancialStatements({ clientId }) {
   const [hideZero, setHideZero] = useState(false)
 
   const [printOpen, setPrintOpen] = useState(false)
-  const [printSel,  setPrintSel]  = useState({ kpi: true, pl: true, bs: true, cf: true })
+  const [printSel,  setPrintSel]  = useState({ cover: true, kpi: true, pl: true, bs: true, cf: true })
 
   const [csvOpen, setCsvOpen] = useState(false)
   const [csvSel,  setCsvSel]  = useState({ kpi: true, pl: true, bs: true, cf: true })
@@ -150,6 +151,27 @@ export default function FinancialStatements({ clientId }) {
     return () => els.forEach(el => el.removeEventListener('scroll', onScroll))
   }, [loading, columns, hideZero, period, year])
 
+  // Shrink each printed statement to fit the page: always to the paper's width,
+  // and to its height too when that keeps the type readable — so a statement a
+  // few rows too long lands on one page instead of spilling onto a second.
+  // Anything longer runs on, with the column header repeated. Measured from the
+  // screen layout just before the print layout is built, so Ctrl+P gets it too.
+  useEffect(() => {
+    // US Letter portrait less 0.4in margins (see @page), less the legend footer.
+    const PAGE_W = 739, PAGE_H = 979 - 60
+    const MIN_ZOOM = 0.72
+    const fit = () => document.querySelectorAll('.fs-section').forEach(el => {
+      const table = el.querySelector('table')
+      if (!table) return
+      const byWidth  = Math.min(1, PAGE_W / (table.offsetWidth + 56))
+      const byHeight = PAGE_H / el.scrollHeight
+      const z = Math.min(byWidth, byHeight) >= MIN_ZOOM ? Math.min(byWidth, byHeight) : byWidth
+      el.style.setProperty('--print-zoom', z.toFixed(3))
+    })
+    window.addEventListener('beforeprint', fit)
+    return () => window.removeEventListener('beforeprint', fit)
+  }, [])
+
   const selectedCount = SECTIONS.filter(s => printSel[s.key]).length
   const doPrint = () => {
     if (!selectedCount) return
@@ -197,12 +219,18 @@ export default function FinancialStatements({ clientId }) {
   )
 
   return (
-    <div style={{ background:T.page, minHeight:'100%', fontFamily:'-apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif', colorScheme:'light' }}>
+    <div className="fs-root" style={{ background:T.page, minHeight:'100%', fontFamily:'-apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif', colorScheme:'light' }}>
       <style>{`
+        .fs-cover { display: none; }
         @media print {
+          @page { size: letter portrait; margin: 0.4in; }
           .fs-bar, aside { display: none !important; }
           body { background: #fff !important; }
+          .fs-cover[data-print="1"] { display: block; }
           .fs-section[data-print="0"] { display: none !important; }
+          .fs-section { zoom: var(--print-zoom, 1); }
+          /* The statements paint the grey screen tint; paper should be white. */
+          .fs-root, .fs-section > div { background: #fff !important; }
           /* A page break before every printed statement except the first — the
              general sibling selector skips over the ones being hidden. */
           .fs-section[data-print="1"] ~ .fs-section[data-print="1"] {
@@ -304,6 +332,13 @@ export default function FinancialStatements({ clientId }) {
                   <div style={{ fontSize:9.5, fontWeight:700, color:T.gold, textTransform:'uppercase', letterSpacing:'.06em', marginBottom:7 }}>
                     Print which statements
                   </div>
+                  <label style={{ display:'flex', alignItems:'center', gap:7, fontSize:12, color:T.charcoal, padding:'3px 0', cursor:'pointer' }}>
+                    <input
+                      type="checkbox" checked={!!printSel.cover}
+                      onChange={e => setPrintSel(p => ({ ...p, cover: e.target.checked }))}
+                    />
+                    Cover page &amp; reading guide
+                  </label>
                   {SECTIONS.map(s => (
                     <label key={s.key} style={{ display:'flex', alignItems:'center', gap:7, fontSize:12, color:T.charcoal, padding:'3px 0', cursor:'pointer' }}>
                       <input
@@ -314,7 +349,7 @@ export default function FinancialStatements({ clientId }) {
                     </label>
                   ))}
                   <div style={{ display:'flex', gap:6, marginTop:9, paddingTop:9, borderTop:`1px solid ${T.border}` }}>
-                    <button style={miniBtn} onClick={() => setPrintSel({ kpi:true, pl:true, bs:true, cf:true })}>All</button>
+                    <button style={miniBtn} onClick={() => setPrintSel({ cover:true, kpi:true, pl:true, bs:true, cf:true })}>All</button>
                     <button
                       style={{ ...miniBtn, flex:1, background:T.navy, color:'#fff', borderColor:T.navy, opacity: selectedCount ? 1 : .5 }}
                       disabled={!selectedCount} onClick={doPrint}
@@ -336,6 +371,10 @@ export default function FinancialStatements({ clientId }) {
       </div>
 
       <DisclosureBanner />
+
+      <div className="fs-section fs-cover" data-print={printSel.cover ? '1' : '0'}>
+        <StatementsCover shared={shared} include={printSel} />
+      </div>
 
       {SECTIONS.map(s => (
         <div
