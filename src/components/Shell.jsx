@@ -121,6 +121,17 @@ function IconTrending() {
   )
 }
 
+function IconLandmark() {
+  return (
+    <svg {...iconProps}>
+      <polygon points="12 2 21 7 3 7" />
+      <line x1="5" y1="10" x2="5" y2="17" /><line x1="9.5" y1="10" x2="9.5" y2="17" />
+      <line x1="14.5" y1="10" x2="14.5" y2="17" /><line x1="19" y1="10" x2="19" y2="17" />
+      <line x1="3" y1="21" x2="21" y2="21" />
+    </svg>
+  )
+}
+
 function IconSliders() {
   return (
     <svg {...iconProps}>
@@ -155,6 +166,7 @@ const NAV = [
     alsoActive: ['/pl', '/balance'] },
   { group: 'Reports', href: '/year-end',     label: 'Year-End',          Icon: IconCalendar   },
   { group: 'Reports', href: '/planner',      label: 'Holiday Planner',   Icon: IconTrending   },
+  { group: 'Reports', href: '/loan',         label: 'Term Loan Planner', Icon: IconLandmark   },
   { group: 'Reports', href: '/buys',         label: 'Inventory Buys',    Icon: IconTag        },
   { group: 'Reports', href: '/vendors',      label: 'Vendors',           Icon: IconStorefront },
   { group: 'Admin',   href: '/accounts',     label: 'Chart of Accounts', Icon: IconBook       },
