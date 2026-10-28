@@ -97,7 +97,7 @@ export default function StatementsCover({ shared, include }) {
       <h2 style={{ ...h2, marginTop: 16 }}>Conventions</h2>
       <ul style={{ margin: 0, paddingLeft: 18, fontSize: 11, lineHeight: 1.6 }}>
         <li>Amounts are in whole dollars. Figures in (parentheses) are negative.</li>
-        <li>A dash (—) means there was no activity on that line in that period.</li>
+        <li>A dash (—) means there was no activity on that line in that period. Lines with no activity in any period are left out.</li>
         <li>All figures are built from the shop&apos;s categorized bank and card transactions, plus month-end entries for cost of goods sold, sales tax and Square fees.</li>
         <li>Each statement starts on a new page and covers the same period, so the columns line up from one to the next.</li>
       </ul>

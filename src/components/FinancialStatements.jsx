@@ -10,6 +10,7 @@
 // statement still fetches for itself when used standalone.
 
 import { useState, useEffect, useMemo, useRef } from 'react'
+import { flushSync } from 'react-dom'
 import Link from 'next/link'
 import { supabase, fetchAll } from '../lib/supabase'
 import { fetchAccounts } from '../lib/chartOfAccounts'
@@ -131,9 +132,14 @@ export default function FinancialStatements({ clientId }) {
     )].sort((a, b) => a - b)
   }, [txns, year, period])
 
+  // Paper always drops the $0 lines — a dash-only row is noise in print, and
+  // leaving them out is what lets the P&L fit on one page. The screen setting
+  // is untouched and comes back after the print dialog closes.
+  const [printing, setPrinting] = useState(false)
+
   const shared = useMemo(
-    () => ({ year, period, hideZero, columns }),
-    [year, period, hideZero, columns])
+    () => ({ year, period, hideZero: hideZero || printing, columns }),
+    [year, period, hideZero, printing, columns])
 
   // Identical columns only line up while the three scroll together; each table
   // has its own horizontal scroller, so mirror them.
@@ -160,16 +166,26 @@ export default function FinancialStatements({ clientId }) {
     // US Letter portrait less 0.4in margins (see @page), less the legend footer.
     const PAGE_W = 739, PAGE_H = 979 - 60
     const MIN_ZOOM = 0.72
-    const fit = () => document.querySelectorAll('.fs-section').forEach(el => {
-      const table = el.querySelector('table')
-      if (!table) return
-      const byWidth  = Math.min(1, PAGE_W / (table.offsetWidth + 56))
-      const byHeight = PAGE_H / el.scrollHeight
-      const z = Math.min(byWidth, byHeight) >= MIN_ZOOM ? Math.min(byWidth, byHeight) : byWidth
-      el.style.setProperty('--print-zoom', z.toFixed(3))
-    })
+    const fit = () => {
+      // Render the $0-free statements now, synchronously, so they're what gets
+      // measured below and what the print layout is built from.
+      flushSync(() => setPrinting(true))
+      document.querySelectorAll('.fs-section').forEach(el => {
+        const table = el.querySelector('table')
+        if (!table) return
+        const byWidth  = Math.min(1, PAGE_W / (table.offsetWidth + 56))
+        const byHeight = PAGE_H / el.scrollHeight
+        const z = Math.min(byWidth, byHeight) >= MIN_ZOOM ? Math.min(byWidth, byHeight) : byWidth
+        el.style.setProperty('--print-zoom', z.toFixed(3))
+      })
+    }
+    const done = () => setPrinting(false)
     window.addEventListener('beforeprint', fit)
-    return () => window.removeEventListener('beforeprint', fit)
+    window.addEventListener('afterprint', done)
+    return () => {
+      window.removeEventListener('beforeprint', fit)
+      window.removeEventListener('afterprint', done)
+    }
   }, [])
 
   const selectedCount = SECTIONS.filter(s => printSel[s.key]).length
