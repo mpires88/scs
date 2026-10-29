@@ -9,7 +9,10 @@ import Login from './Login'
 import ErrorBoundary from './ErrorBoundary'
 import { PrintDisclosure } from './Disclosure'
 
-const AUTH_DISABLED = process.env.NEXT_PUBLIC_DISABLE_AUTH === 'true'
+// Dev-only login bypass. NODE_ENV is inlined at build time, so a production
+// build (`next build`) can never skip auth even if the flag is set.
+const AUTH_DISABLED =
+  process.env.NODE_ENV === 'development' && process.env.NEXT_PUBLIC_DISABLE_AUTH === 'true'
 
 // ─── SVG Icons ────────────────────────────────────────────────────────────────
 
