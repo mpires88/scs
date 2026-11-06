@@ -124,6 +124,15 @@ function IconTrending() {
   )
 }
 
+function IconBarChart() {
+  return (
+    <svg {...iconProps}>
+      <line x1="3" y1="21" x2="21" y2="21" />
+      <rect x="5" y="12" width="3" height="6" /><rect x="10.5" y="8" width="3" height="10" /><rect x="16" y="4" width="3" height="14" />
+    </svg>
+  )
+}
+
 function IconLandmark() {
   return (
     <svg {...iconProps}>
@@ -170,6 +179,7 @@ const NAV = [
   { group: 'Reports', href: '/year-end',     label: 'Year-End',          Icon: IconCalendar   },
   { group: 'Reports', href: '/planner',      label: 'Holiday Planner',   Icon: IconTrending   },
   { group: 'Reports', href: '/loan',         label: 'Term Loan Planner', Icon: IconLandmark   },
+  { group: 'Reports', href: '/projections',  label: 'Projections',       Icon: IconBarChart   },
   { group: 'Reports', href: '/buys',         label: 'Inventory Buys',    Icon: IconTag        },
   { group: 'Reports', href: '/vendors',      label: 'Vendors',           Icon: IconStorefront },
   { group: 'Admin',   href: '/accounts',     label: 'Chart of Accounts', Icon: IconBook       },

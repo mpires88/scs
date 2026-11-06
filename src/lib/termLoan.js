@@ -61,6 +61,16 @@ export function levelPayment(principal, monthlyRate, months) {
 // that was servicing them is what now services the loan. That history already
 // paid the owner `ownerPayCurrent` through payroll, so only a raise above it —
 // grossed up by the employer's share of payroll tax — comes out of it.
+//
+// A scheduled step-up (`ownerPayTarget` from `ownerPayStepDate` on) replaces
+// the proposed pay for every payment month on or after that date; the bank
+// balance carries it, while the DSCR and free-cash figures stay those of the
+// proposed pay and the step gets its own (`stepFreeCash`, `stepDscr`).
+//
+// `freeCashByYm` ({ 'YYYY-MM': amount }), when given, replaces the flat
+// `monthlyFreeCash` month by month in the bank balance — the Projections
+// page's growth and seasonality. Months it doesn't cover fall back to the flat
+// figure, which also stays the basis for the DSCR and free-cash figures.
 export function buildTermLoan({
   amount,
   aprPct = 0,
@@ -76,6 +86,9 @@ export function buildTermLoan({
   ownerPayCurrent = 0,
   ownerPayProposed = ownerPayCurrent,
   payrollTaxPct = 0,
+  ownerPayTarget = 0,
+  ownerPayStepDate = '',
+  freeCashByYm = null,
 }) {
   const principal = num(amount)
   const term = Math.round(num(termMonths))
@@ -121,11 +134,18 @@ export function buildTermLoan({
   const raise = round2(num(ownerPayProposed) - num(ownerPayCurrent))
   const raiseCost = round2(raise * (1 + Math.max(0, num(payrollTaxPct)) / 100))
   const free = round2(freeBefore - raiseCost)
+  const gross = 1 + Math.max(0, num(payrollTaxPct)) / 100
+  const stepOn = num(ownerPayTarget) > 0 && /^\d{4}-\d{2}-\d{2}$/.test(ownerPayStepDate || '')
+  const stepCost = stepOn ? round2((num(ownerPayTarget) - num(ownerPayCurrent)) * gross) : 0
+  const stepFree = stepOn ? round2(freeBefore - stepCost) : null
+  const stepRow = stepOn ? schedule.find(r => r.date >= ownerPayStepDate) ?? null : null
   let cash = round2(num(openingCash) + toBank)
   const series = [{ n: 0, date: closingDate, loanBalance: principal, cash }]
   let minCash = { amount: cash, date: closingDate }
   schedule.forEach(row => {
-    cash = round2(cash + free - row.payment - (row.n === months ? balloon : 0))
+    const before = freeCashByYm?.[row.date.slice(0, 7)] ?? freeBefore
+    const monthFree = stepRow && row.n >= stepRow.n ? before - stepCost : before - raiseCost
+    cash = round2(cash + monthFree - row.payment - (row.n === months ? balloon : 0))
     if (cash < minCash.amount) minCash = { amount: cash, date: row.date }
     series.push({ n: row.n, date: row.date, loanBalance: row.n === months ? 0 : row.balance, cash })
   })
@@ -133,6 +153,13 @@ export function buildTermLoan({
   return {
     payment, months, fee, taxes, cards, accountant, toBank, oddInterest,
     freeBefore, raise, raiseCost, freeCash: free,
+    // The step-up, when one is scheduled: the first payment month it applies
+    // to (null when it falls after maturity) and the free cash at that pay.
+    step: stepOn ? {
+      date: stepRow?.date ?? null,
+      freeCash: stepFree,
+      dscr: payment > 0 ? stepFree / payment : null,
+    } : null,
     schedule, balloon, maturityDate,
     totalInterest,
     lenderEarnings: round2(totalInterest + fee),
@@ -168,7 +195,7 @@ const EMPLOYEE_FICA = 0.0765
 // the gross pay that matches benefit plus capped pay after FICA, and the free
 // cash the shop would need to carry that pay at the coverage target.
 export function maxOwnerPay(inputs, { dscrTarget = 1.25, cashFloor = 0, benefitLimit = 0, ssdiBenefit = 0 } = {}) {
-  const base = buildTermLoan({ ...inputs, ownerPayProposed: inputs.ownerPayCurrent })
+  const base = buildTermLoan({ ...inputs, ownerPayProposed: inputs.ownerPayCurrent, ownerPayStepDate: '' })
   if (!base) return null
   const gross = 1 + Math.max(0, num(inputs.payrollTaxPct)) / 100
   const current = num(inputs.ownerPayCurrent)
@@ -202,6 +229,48 @@ export function maxOwnerPay(inputs, { dscrTarget = 1.25, cashFloor = 0, benefitL
     max: ceilings[binding],
     withoutBenefit: Math.min(byCoverage, byCash),
     binding, replacement,
+  }
+}
+
+// The plan for stepping the owner up to `ownerPayTarget` and giving up SSDI.
+// Two sides:
+//   • the shop — what the step costs each month over the free-cash history
+//     (which already pays `ownerPayCurrent`), the free cash it needs to carry
+//     that while keeping coverage at `dscrTarget`, and the same once the loan
+//     is gone; each with the gap to what the shop earns now
+//   • the owner — take-home today (proposed pay after FICA, plus the check)
+//     against take-home at the target, which has no check. Income tax is left
+//     out: SSDI is partly taxable too, so the comparison stays rough.
+// `breakEven` is the gross pay at which giving up the check leaves him even.
+export function ownerStepPlan(inputs, { dscrTarget = 1.25, ssdiBenefit = 0, ownerPayTarget = 0 } = {}) {
+  const target = num(ownerPayTarget)
+  if (!(target > 0)) return null
+  const base = buildTermLoan({ ...inputs, ownerPayProposed: inputs.ownerPayCurrent, ownerPayStepDate: '' })
+  if (!base) return null
+  const gross = 1 + Math.max(0, num(inputs.payrollTaxPct)) / 100
+  const current = num(inputs.ownerPayCurrent)
+  const proposed = num(inputs.ownerPayProposed ?? current)
+  const ssdi = Math.max(0, num(ssdiBenefit))
+  const keep = 1 - EMPLOYEE_FICA
+
+  const stepCost = round2((target - current) * gross)
+  const freeNeeded = round2(num(dscrTarget) * base.payment + stepCost)
+  const freeNeededAfterLoan = Math.max(0, stepCost)
+  const homeNow = round2(proposed * keep + ssdi)
+  const homeTarget = round2(target * keep)
+
+  return {
+    target, stepCost,
+    stepCostOverProposed: round2((target - proposed) * gross),
+    freeNow: base.freeCash,
+    freeNeeded,
+    shortfall: round2(Math.max(0, freeNeeded - base.freeCash)),
+    freeNeededAfterLoan,
+    shortfallAfterLoan: round2(Math.max(0, freeNeededAfterLoan - base.freeCash)),
+    homeNow, homeTarget,
+    gain: round2(homeTarget - homeNow),
+    breakEven: round2(proposed + ssdi / keep),
+    maturityDate: base.maturityDate,
   }
 }
 
