@@ -18,12 +18,15 @@ import { supabase, fetchAll } from '../lib/supabase'
 import { fetchAccounts } from '../lib/chartOfAccounts'
 import { getSetting, setSetting } from '../lib/settings'
 import { buildBalanceSheet, balanceSheetYears } from '../lib/balanceSheet'
-import { buildTermLoan, buildLoanSeeds, maxOwnerPay } from '../lib/termLoan'
+import { buildTermLoan, buildLoanSeeds, maxOwnerPay, ownerStepPlan, firstPaymentDate, addMonths } from '../lib/termLoan'
+import { buildProjectionBase, projectionDefaults, projectedFreeCash } from '../lib/projections'
+import Link from 'next/link'
 import { T, MON, fmt, fmt2, fmtK, fmtYm } from '../lib/theme'
 import InfoTip from './InfoTip'
 import CommitInput from './CommitInput'
 
 const SCENARIO_KEY = 'term_loan_scenario'
+const PROJECTION_KEY = 'projection_scenario'
 
 const pad2 = n => String(n).padStart(2, '0')
 const fmtDate = iso => {
@@ -59,8 +62,12 @@ const seedsToInputs = (s, now = new Date()) => {
     payrollTaxPct:    7.65,
     dscrTarget:       1.25,
     cashFloor:        5000,
+    ssdiOn:           true, // count SSDI: the earnings limit and his check
     benefitLimit:     1210, // 2026 SSDI trial-work line
     ssdiBenefit:      0,
+    ownerPayTarget:   4000,
+    ownerPayStepDate: '', // unscheduled until a date is picked
+    useProjections:   true, // free cash month by month from the Projections page
   }
 }
 
@@ -80,6 +87,8 @@ function ChartTip({ active, payload, label }) {
 
 export default function TermLoanPlanner({ clientId }) {
   const [seeds,   setSeeds]   = useState(null)
+  const [projBase, setProjBase] = useState(null)
+  const [projSc,  setProjSc]  = useState(null)
   const [inputs,  setInputs]  = useState(null)
   const [loading, setLoading] = useState(true)
   const [error,   setError]   = useState(null)
@@ -91,7 +100,7 @@ export default function TermLoanPlanner({ clientId }) {
       setLoading(true); setError(null)
       try {
         // No category filter: uncategorized rows are still cash movements.
-        const [rows, coa, reg, saved] = await Promise.all([
+        const [rows, coa, reg, saved, projSaved] = await Promise.all([
           fetchAll(() => supabase.from('bank_transactions')
             .select('transaction_date, amount, category, account')
             .eq('client_id', clientId)
@@ -99,6 +108,7 @@ export default function TermLoanPlanner({ clientId }) {
           fetchAccounts(clientId),
           getSetting(clientId, 'ledger_accounts', []).catch(() => []),
           getSetting(clientId, SCENARIO_KEY, null).catch(() => null),
+          getSetting(clientId, PROJECTION_KEY, null).catch(() => null),
         ])
         if (cancelled) return
         const registry = Array.isArray(reg) ? reg : []
@@ -106,6 +116,8 @@ export default function TermLoanPlanner({ clientId }) {
         const bs = buildBalanceSheet({ txns: rows ?? [], accounts: coa.accounts, year: years[years.length - 1], registry })
         const s = buildLoanSeeds({ txns: rows ?? [], accounts: coa.accounts, registry, bs, now: new Date() })
         setSeeds(s)
+        setProjBase(buildProjectionBase({ txns: rows ?? [], accounts: coa.accounts, now: new Date() }))
+        setProjSc(projSaved)
         // Saved scenario wins, field by field, so a newly added input still
         // gets its ledger default.
         setInputs({ ...seedsToInputs(s), ...(saved ?? {}) })
@@ -126,8 +138,29 @@ export default function TermLoanPlanner({ clientId }) {
   const setField = useCallback((key, val) => save({ ...inputs, [key]: val }, '✓ Scenario saved'), [inputs, save])
   const resetToLedger = useCallback(() => save(seedsToInputs(seeds), '✓ Reset to ledger defaults'), [seeds, save])
 
-  const loan = useMemo(() => inputs ? buildTermLoan(inputs) : null, [inputs])
-  const payCap = useMemo(() => inputs ? maxOwnerPay(inputs, inputs) : null, [inputs])
+  // With the Projections figures on, each month's free cash comes from the
+  // projection (growth, seasonality, cost of goods, draws); the coverage and
+  // pay-ceiling tests use its average over the twelve months that pay the first twelve payments.
+  const projected = useMemo(() => {
+    if (!inputs?.useProjections || !projBase || !/^\d{4}-\d{2}-\d{2}$/.test(inputs.closingDate || '')) return null
+    return projectedFreeCash(projBase, { ...projectionDefaults(projBase), ...(projSc ?? {}) }, {
+      ownerPayCurrent: inputs.ownerPayCurrent,
+      payrollTaxPct:   inputs.payrollTaxPct,
+      stepYm:          inputs.ownerPayStepDate ? inputs.ownerPayStepDate.slice(0, 7) : null,
+      fromYm:          addMonths(firstPaymentDate(inputs.closingDate), -1).slice(0, 7), // the month that pays the first payment
+    })
+  }, [inputs, projBase, projSc])
+  // SSDI off: no earnings limit and no check, everywhere downstream.
+  const eff = useMemo(() => {
+    if (!inputs) return inputs
+    const withProj = projected ? { ...inputs, monthlyFreeCash: projected.avg, freeCashByYm: projected.byYm } : inputs
+    return inputs.ssdiOn === false ? { ...withProj, benefitLimit: 0, ssdiBenefit: 0 } : withProj
+  }, [inputs, projected])
+  const ssdiOn = inputs?.ssdiOn !== false
+
+  const loan = useMemo(() => eff ? buildTermLoan(eff) : null, [eff])
+  const payCap = useMemo(() => eff ? maxOwnerPay(eff, eff) : null, [eff])
+  const stepPlan = useMemo(() => eff ? ownerStepPlan(eff, eff) : null, [eff])
 
   if (loading) return (
     <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', minHeight: 300, background: T.page }}>
@@ -268,7 +301,24 @@ export default function TermLoanPlanner({ clientId }) {
 
               <div style={{ ...panelLabel, marginTop: 16 }}>The shop’s cash</div>
               {row('openingCash', 'Bank balance at closing', '$', 'What is in the shop’s bank account just before the loan funds.')}
-              {row('monthlyFreeCash', 'Free cash / month', '$', 'What the bank account gains in an ordinary month before card payments and before this loan’s payment, at the owner’s current pay. With the cards paid off, this is what services the loan.')}
+              <div style={inputRow}>
+                <span style={inputLabel}>
+                  Use the Projections figures
+                  <InfoTip title="Use the Projections figures">On: each month’s free cash comes from the Projections page — its revenue growth, the season, cost of goods, expense growth and owner draws — so the bank balance grows (or shrinks) with the business. The coverage and pay-ceiling figures use the average of the twelve months that pay the first twelve payments. Off: one flat free-cash figure, entered here, for every month.</InfoTip>
+                </span>
+                <input type="checkbox" checked={!!inputs.useProjections} onChange={e => setField('useProjections', e.target.checked)} />
+              </div>
+              {projected
+                ? <div style={inputRow}>
+                    <span style={inputLabel}>
+                      Free cash / month
+                      <InfoTip title="Free cash from Projections">The projection’s profit before owner pay, less the owner’s current pay and its payroll tax, less draws — before card payments and this loan’s payment. Shown is the average of the twelve months that pay the first twelve payments; the bank balance uses each month’s own figure. The flat {fmt(inputs.monthlyFreeCash)} entered before is kept for when this is turned off.</InfoTip>
+                    </span>
+                    <span style={{ fontSize: 12, color: T.navy, fontWeight: 600, fontVariantNumeric: 'tabular-nums' }}>
+                      {fmt(projected.avg)} <span style={{ fontWeight: 400, color: '#9ca3af', fontSize: 10.5 }}>avg · <Link href="/projections" style={{ color: T.steel }}>Projections</Link></span>
+                    </span>
+                  </div>
+                : row('monthlyFreeCash', 'Free cash / month', '$', 'What the bank account gains in an ordinary month before card payments and before this loan’s payment, at the owner’s current pay. With the cards paid off, this is what services the loan.')}
 
               <div style={{ ...panelLabel, marginTop: 16 }}>Owner pay</div>
               {row('ownerPayCurrent', 'Current pay / month', '$', 'What the owner is paid through payroll today. The free cash above already has this taken out.')}
@@ -276,8 +326,36 @@ export default function TermLoanPlanner({ clientId }) {
               {row('payrollTaxPct', 'Employer payroll tax', '%', 'The shop’s share of payroll tax on the raise — 7.65% Social Security and Medicare, more if state unemployment applies.')}
               {row('dscrTarget', 'Coverage to keep', '×', 'Free cash after the raise must cover the loan payment this many times over. 1.25× is the usual lender floor; 1.00× is breakeven.')}
               {row('cashFloor', 'Lowest bank balance', '$', 'The bank balance the shop should never drop below while the loan is outstanding.')}
-              {row('benefitLimit', 'SSDI earnings limit', '$', 'Gross monthly pay that keeps his SSDI untouched. 2026: $1,210 is the trial-work line (above it a month uses one of nine trial months); $1,690 is substantial gainful activity (above it, once the trial months are spent, the check stops). The lines rise each January — $1,270 for trial work in 2027. SSA can also count the value of the work he does in the business, not just payroll. 0 turns the limit off.')}
-              {row('ssdiBenefit', 'SSDI check / month', '$', 'His monthly SSDI benefit. With it, the page works out the pay that would fully replace it — the point at which the earnings limit can come off.')}
+              <div style={inputRow}>
+                <span style={inputLabel}>
+                  Count SSDI
+                  <InfoTip title="Count SSDI">On: his pay is capped at the SSDI earnings limit and his monthly check counts in what he takes home until the step-up. Off: no limit and no check — for when the benefit has ended. Shared with the Projections page.</InfoTip>
+                </span>
+                <input type="checkbox" checked={ssdiOn} onChange={e => setField('ssdiOn', e.target.checked)} />
+              </div>
+              {ssdiOn && row('benefitLimit', 'SSDI earnings limit', '$', 'Gross monthly pay that keeps his SSDI untouched. 2026: $1,210 is the trial-work line (above it a month uses one of nine trial months); $1,690 is substantial gainful activity (above it, once the trial months are spent, the check stops). The lines rise each January — $1,270 for trial work in 2027. SSA can also count the value of the work he does in the business, not just payroll. 0 turns the limit off.')}
+              {ssdiOn && row('ssdiBenefit', 'SSDI check / month', '$', 'His monthly SSDI benefit. With it, the page works out the pay that would fully replace it — the point at which the earnings limit can come off.')}
+
+              <div style={{ ...panelLabel, marginTop: 16 }}>Step-up plan</div>
+              {row('ownerPayTarget', 'Target pay / month', '$', 'The gross monthly pay to step up to once the shop can carry it — the level at which SSDI is given up. 0 turns the plan off.')}
+              <div style={inputRow}>
+                <span style={inputLabel}>
+                  Step up on
+                  <InfoTip title="Step up on">Optional. Pick a date and the bank balance on the chart switches to the target pay from that month on. Leave it blank to see the plan without scheduling it.</InfoTip>
+                </span>
+                <span style={{ display: 'inline-flex', alignItems: 'center', gap: 4 }}>
+                  <input
+                    type="date"
+                    value={inputs.ownerPayStepDate || ''}
+                    onChange={e => setField('ownerPayStepDate', e.target.value)}
+                    style={{ padding: '3px 6px', border: `1px solid ${T.border}`, borderRadius: 5, fontSize: 12, color: T.charcoal, background: '#fff', outline: 'none', fontFamily: 'inherit' }}
+                  />
+                  {inputs.ownerPayStepDate && (
+                    <button className="tl-controls" title="Clear the date" onClick={() => setField('ownerPayStepDate', '')}
+                      style={{ ...btnSec, padding: '2px 7px' }}>×</button>
+                  )}
+                </span>
+              </div>
             </>}
             {seeds && (
               <p style={{ fontSize: 10.5, color: '#9ca3af', margin: '9px 0 0', lineHeight: 1.5 }}>
@@ -349,6 +427,82 @@ export default function TermLoanPlanner({ clientId }) {
               )
             })()}
 
+            {/* Step-up plan */}
+            {loan && stepPlan && (() => {
+              const p = stepPlan
+              const ssdi = ssdiOn ? Number(inputs.ssdiBenefit) || 0 : 0
+              const ready = p.shortfall === 0
+              const readyAfter = p.shortfallAfterLoan === 0
+              const box = (label, value, sub, color = T.navy) => (
+                <div style={{ flex: '1 1 150px', minWidth: 150, padding: '9px 12px', border: `1px solid ${T.border}`, borderRadius: 6, background: '#fff' }}>
+                  <div style={cardLabel}>{label}</div>
+                  <div style={{ ...cardBig, color }}>
+                    {fmt(value)}<span style={{ fontSize: 11, fontWeight: 400, color: '#9ca3af' }}>/mo</span>
+                  </div>
+                  <div style={cardSub}>{sub}</div>
+                </div>
+              )
+              const note = { fontSize: 11, color: T.charcoal, opacity: .85, margin: '10px 0 0', lineHeight: 1.6 }
+              return (
+                <div style={panel}>
+                  <div style={{ ...panelLabel, display: 'flex', alignItems: 'center', gap: 5 }}>
+                    Stepping up to {fmt(p.target)}
+                    <InfoTip title="Step-up plan">
+                      The jump from today’s pay, kept under the SSDI line, to the target pay, where the check
+                      is given up. The owner’s side compares take-home after the employee’s 7.65% FICA (income
+                      tax left out); the shop’s side is the free cash it needs to carry the higher payroll.
+                    </InfoTip>
+                  </div>
+                  <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap' }}>
+                    {box('His take-home today', p.homeNow,
+                      ssdi ? `${fmt(inputs.ownerPayProposed)} after FICA + ${fmt(ssdi)} SSDI`
+                        : ssdiOn ? `${fmt(inputs.ownerPayProposed)} after FICA — no SSDI check entered`
+                        : `${fmt(inputs.ownerPayProposed)} after FICA — SSDI not counted`)}
+                    {box('Take-home at target', p.homeTarget,
+                      <>{fmt(p.target)} after FICA{ssdiOn ? ', no check' : ''} · <span style={{ color: p.gain >= 0 ? T.success : T.danger, fontWeight: 600 }}>{p.gain >= 0 ? '+' : '−'}{fmt(Math.abs(p.gain))}</span></>,
+                      p.gain >= 0 ? T.navy : T.danger)}
+                    {box('Free cash needed', p.freeNeeded,
+                      `with the loan, at ${Number(inputs.dscrTarget).toFixed(2)}× coverage`, ready ? T.success : T.danger)}
+                    {box('After the loan', p.freeNeededAfterLoan,
+                      `once it’s paid off ${fmtDate(p.maturityDate)}`, readyAfter ? T.success : T.danger)}
+                  </div>
+                  <p style={note}>
+                    The shop earns about <strong>{fmt(p.freeNow)}/month</strong> of free cash at the owner’s current {fmt(inputs.ownerPayCurrent)}.
+                    Paying {fmt(p.target)} costs it <strong>{fmt(p.stepCost)}/month</strong> more than that with payroll tax
+                    ({fmt(p.stepCostOverProposed)} more than the proposed {fmt(inputs.ownerPayProposed)}).{' '}
+                    {ready
+                      ? <span style={{ color: T.success, fontWeight: 600 }}>The shop can carry it now, loan and all.</span>
+                      : <>While the loan is outstanding, free cash has to grow by <span style={{ color: T.danger, fontWeight: 600 }}>{fmt(p.shortfall)}/month</span> first.{' '}
+                          {readyAfter
+                            ? <>Once the loan is paid off, today’s free cash would carry it.</>
+                            : <>Even with the loan gone it needs <strong>{fmt(p.shortfallAfterLoan)}/month</strong> more.</>}</>}
+                  </p>
+                  {ssdi > 0 && (
+                    <p style={{ ...note, margin: '8px 0 0' }}>
+                      Giving up the check only comes out ahead above about <strong>{fmt(p.breakEven)}/month</strong> gross;
+                      between {fmt(inputs.ownerPayProposed)} and that, he takes home less than he does today.
+                    </p>
+                  )}
+                  {loan.step && (
+                    <p style={{ ...note, margin: '8px 0 0' }}>
+                      {loan.step.date
+                        ? <>Scheduled from <strong>{fmtDate(loan.step.date)}</strong>: free cash drops to {fmt(loan.step.freeCash)}/month and
+                            cash-basis coverage to <strong style={{ color: loan.step.dscr >= 1 ? T.navy : T.danger }}>{loan.step.dscr != null ? `${loan.step.dscr.toFixed(2)}×` : '—'}</strong>.
+                            The chart and the lowest-bank-balance card include it.</>
+                        : <>The step date falls after the loan matures on {fmtDate(loan.maturityDate)}, so it doesn’t touch the loan.</>}
+                    </p>
+                  )}
+                  {ssdiOn && <p style={{ ...note, margin: '8px 0 0', paddingTop: 8, borderTop: '1px solid #F0EEE9', fontSize: 10.5, color: '#6b7280' }}>
+                    SSDI doesn’t stop the month pay jumps. Each month over the trial-work line uses one of nine trial
+                    months; once those are used, the first month over substantial gainful activity and the two after it
+                    are still paid, then the check stops. For the following 36 months it restarts without a new
+                    application in any month pay drops back under that line. Trial months already used count against
+                    the nine — confirm where he stands with SSA before picking the date.
+                  </p>}
+                </div>
+              )
+            })()}
+
             {/* Balance curve */}
             <div style={panel}>
               <div style={panelLabel}>The loan and the bank account</div>
@@ -360,14 +514,20 @@ export default function TermLoanPlanner({ clientId }) {
                   <Tooltip content={<ChartTip />} />
                   <Legend wrapperStyle={{ fontSize: 11 }} />
                   <ReferenceLine y={0} stroke={T.charcoal} strokeOpacity={0.45} />
+                  {loan?.step?.date && (
+                    <ReferenceLine x={fmtYm(loan.step.date.slice(0, 7))} stroke={T.gold} strokeDasharray="4 3"
+                      label={{ value: `Pay to ${fmt(inputs.ownerPayTarget)}`, position: 'insideTopRight', fontSize: 10, fill: T.gold }} />
+                  )}
                   <Area type="monotone" dataKey="loanBalance" name="Loan balance" fill={T.steel} fillOpacity={0.14} stroke={T.steel} strokeWidth={1} />
                   <Line type="monotone" dataKey="cash" name="Shop bank balance" stroke={T.success} strokeWidth={2} dot={false} />
                 </ComposedChart>
               </ResponsiveContainer>
               <p style={{ fontSize: 10.5, color: '#9ca3af', margin: '6px 0 0', lineHeight: 1.5 }}>
                 The bank balance starts at closing with the remainder added, then each month gains the free
-                cash and pays the loan{loan?.balloon ? '; the balloon comes out at maturity' : ''}. It assumes
-                every month is an ordinary one — the table below shows how uneven they really are.
+                cash and pays the loan{loan?.balloon ? '; the balloon comes out at maturity' : ''}.{' '}
+                {projected
+                  ? <>Each month’s free cash comes from the Projections page — its growth, the season, cost of goods and draws.</>
+                  : <>It assumes every month is an ordinary one — the table below shows how uneven they really are.</>}
               </p>
             </div>
 
@@ -465,9 +625,13 @@ export default function TermLoanPlanner({ clientId }) {
               <p style={{ fontSize: 11, color: T.charcoal, opacity: .85, margin: '10px 0 0', lineHeight: 1.6 }}>
                 Annual debt service is the first twelve months of payments{loan.months <= 12 && loan.balloon ? ', balloon included' : ''}.
                 The earnings figures come off the P&amp;L, whose cost of goods is an estimate until the quarterly
-                count trues it up, and profit that went back onto the shelf as inventory is not cash. The cash
-                basis uses the free cash entered above — what the bank account actually gained, less any raise — and is the
-                one to lean on.
+                count trues it up, and profit that went back onto the shelf as inventory is not cash.{' '}
+                {projected
+                  ? <>The cash basis uses the Projections page’s free cash — a forecast built on the P&amp;L, so it is
+                      only as good as its growth and cost-of-goods assumptions. Compare it with what the bank actually
+                      gained ({fmt(seeds?.avgFreeCash)}/month over the last twelve months) before leaning on it.</>
+                  : <>The cash basis uses the free cash entered above — what the bank account actually gained, less any
+                      raise — and is the one to lean on.</>}
               </p>
             </div>
           )

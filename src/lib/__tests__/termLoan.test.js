@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest'
-import { addMonths, firstPaymentDate, levelPayment, buildTermLoan, buildLoanSeeds, maxOwnerPay } from '../termLoan'
+import { addMonths, firstPaymentDate, levelPayment, buildTermLoan, buildLoanSeeds, maxOwnerPay, ownerStepPlan } from '../termLoan'
 import { buildBalanceSheet } from '../balanceSheet'
 
 // $30k at 9% over 36 months, closing Nov 15: $6k of back taxes and $4k of
@@ -233,6 +233,39 @@ describe('accountant payable and owner pay', () => {
     const at = buildTermLoan({ ...inputs, ownerPayProposed: m.replacement.pay })
     expect(at.freeCash + m.replacement.shortfall).toBeCloseTo(at.payment, 0)
     expect(m.replacement.freeNeeded).toBeCloseTo(1500 + m.replacement.shortfall, 2)
+  })
+
+  it('switches the bank balance to the target pay from the step date on', () => {
+    const inputs = { ...BASE, ownerPayCurrent: 700, ownerPayProposed: 1210, payrollTaxPct: 0, ownerPayTarget: 4000 }
+    const flat = buildTermLoan(inputs) // no date: plan only, nothing scheduled
+    expect(flat.step).toBeNull()
+    const stepped = buildTermLoan({ ...inputs, ownerPayStepDate: '2027-06-01' })
+    expect(stepped.step.date).toBe('2027-06-01')
+    expect(stepped.step.freeCash).toBe(1500 - 3300)
+    // Same free cash and coverage before the step; months after drop by the extra pay.
+    expect(stepped.dscr).toBe(flat.dscr)
+    // The Jun 1 point is May's money, still at the old pay; Jul 1 carries June's.
+    const k = stepped.schedule.findIndex(r => r.date === '2027-07-01') + 1
+    expect(stepped.series[k - 1].cash).toBe(flat.series[k - 1].cash)
+    expect(stepped.series[k].cash).toBeCloseTo(flat.series[k].cash - (4000 - 1210), 2)
+    // A date past maturity leaves the loan alone.
+    const late = buildTermLoan({ ...inputs, ownerPayStepDate: '2035-01-01' })
+    expect(late.step.date).toBeNull()
+    expect(late.endingCash).toBe(flat.endingCash)
+  })
+
+  it('prices the step-up for the shop and the owner', () => {
+    const inputs = { ...BASE, ownerPayCurrent: 700, ownerPayProposed: 1210, payrollTaxPct: 10 }
+    const p = ownerStepPlan(inputs, { dscrTarget: 1.25, ssdiBenefit: 1500, ownerPayTarget: 4000 })
+    const base = buildTermLoan(inputs)
+    expect(p.stepCost).toBe(3630)
+    expect(p.freeNeeded).toBeCloseTo(1.25 * base.payment + 3630, 2)
+    expect(p.shortfall).toBeCloseTo(p.freeNeeded - 1500, 2)
+    expect(p.shortfallAfterLoan).toBe(2130)
+    expect(p.homeNow).toBeCloseTo(1210 * 0.9235 + 1500, 1)
+    expect(p.homeTarget).toBeCloseTo(4000 * 0.9235, 2)
+    expect(p.breakEven).toBeCloseTo(1210 + 1500 / 0.9235, 2)
+    expect(ownerStepPlan(inputs, { ownerPayTarget: 0 })).toBeNull()
   })
 
   it('solves the pay that keeps the bank balance at the floor', () => {

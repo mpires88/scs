@@ -54,7 +54,8 @@ Routes: `/` (Dashboard) · `/transactions` · `/close` · `/pl` · `/balance` ·
       URL could create an account and read/write all your data.
 
    For local development before auth is set up, put
-   `NEXT_PUBLIC_DISABLE_AUTH=true` in `.env` (never deploy with this on).
+   `NEXT_PUBLIC_DISABLE_AUTH=true` in `.env`. The bypass only works under
+   `next dev`; production builds always require sign-in.
 
    ⚠️ The Supabase **service key** (`SUPABASE_SERVICE_KEY` in `.env`) bypasses
    Row Level Security. Never give it a `NEXT_PUBLIC_` prefix and never import

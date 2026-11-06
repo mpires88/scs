@@ -5,12 +5,13 @@ import { T } from '../lib/theme'
 
 // Commit on blur or Enter, Escape reverts — same contract as Settings inputs,
 // so a half-typed number never drives the simulation or a network write.
-export default function CommitInput({ value, onCommit, suffix = '', width = 86 }) {
+// `allowNegative` is for rates that can run either way (a growth assumption).
+export default function CommitInput({ value, onCommit, suffix = '', width = 86, allowNegative = false }) {
   const [draft, setDraft] = useState(String(value))
   useEffect(() => { setDraft(String(value)) }, [value])
   const commit = () => {
     const n = parseFloat(String(draft).replace(/[$,%\s]/g, ''))
-    if (!isNaN(n) && n >= 0 && n !== value) onCommit(n)
+    if (!isNaN(n) && (allowNegative || n >= 0) && n !== value) onCommit(n)
     else setDraft(String(value))
   }
   return (
