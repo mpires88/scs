@@ -67,8 +67,9 @@ export function levelPayment(principal, monthlyRate, months) {
 // balance carries it, while the DSCR and free-cash figures stay those of the
 // proposed pay and the step gets its own (`stepFreeCash`, `stepDscr`).
 //
-// `freeCashByYm` ({ 'YYYY-MM': amount }), when given, replaces the flat
-// `monthlyFreeCash` month by month in the bank balance — the Projections
+// `freeCashByYm` ({ 'YYYY-MM': amount }, keyed by the month the cash is
+// earned), when given, replaces the flat `monthlyFreeCash` month by month in
+// the bank balance — the Projections
 // page's growth and seasonality. Months it doesn't cover fall back to the flat
 // figure, which also stays the basis for the DSCR and free-cash figures.
 export function buildTermLoan({
@@ -138,12 +139,18 @@ export function buildTermLoan({
   const stepOn = num(ownerPayTarget) > 0 && /^\d{4}-\d{2}-\d{2}$/.test(ownerPayStepDate || '')
   const stepCost = stepOn ? round2((num(ownerPayTarget) - num(ownerPayCurrent)) * gross) : 0
   const stepFree = stepOn ? round2(freeBefore - stepCost) : null
-  const stepRow = stepOn ? schedule.find(r => r.date >= ownerPayStepDate) ?? null : null
+  // Payments fall on the 1st, so each one is met by the month just before it:
+  // the Jan 1 point adds December's free cash. Closing to the first payment is
+  // then fully covered, and the step-up shows from the first point whose month
+  // was paid at the new rate.
+  const earnedIn = row => addMonths(row.date, -1).slice(0, 7)
+  const stepYm = stepOn ? ownerPayStepDate.slice(0, 7) : null
+  const stepRow = stepOn ? schedule.find(r => earnedIn(r) >= stepYm) ?? null : null
   let cash = round2(num(openingCash) + toBank)
   const series = [{ n: 0, date: closingDate, loanBalance: principal, cash }]
   let minCash = { amount: cash, date: closingDate }
   schedule.forEach(row => {
-    const before = freeCashByYm?.[row.date.slice(0, 7)] ?? freeBefore
+    const before = freeCashByYm?.[earnedIn(row)] ?? freeBefore
     const monthFree = stepRow && row.n >= stepRow.n ? before - stepCost : before - raiseCost
     cash = round2(cash + monthFree - row.payment - (row.n === months ? balloon : 0))
     if (cash < minCash.amount) minCash = { amount: cash, date: row.date }
@@ -153,10 +160,10 @@ export function buildTermLoan({
   return {
     payment, months, fee, taxes, cards, accountant, toBank, oddInterest,
     freeBefore, raise, raiseCost, freeCash: free,
-    // The step-up, when one is scheduled: the first payment month it applies
-    // to (null when it falls after maturity) and the free cash at that pay.
+    // The step-up, when one is scheduled: its date (null when no payment month
+    // is earned at the new pay before maturity) and the free cash at that pay.
     step: stepOn ? {
-      date: stepRow?.date ?? null,
+      date: stepRow ? ownerPayStepDate : null,
       freeCash: stepFree,
       dscr: payment > 0 ? stepFree / payment : null,
     } : null,

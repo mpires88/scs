@@ -1,6 +1,6 @@
 import { describe, it, expect } from 'vitest'
 import { buildProjectionBase, buildProjection, projectedFreeCash } from '../projections'
-import { buildTermLoan } from '../termLoan'
+import { buildTermLoan, addMonths } from '../termLoan'
 
 const accounts = [
   { name: 'Sales', pl_section: 'Revenue' },
@@ -135,8 +135,19 @@ describe('projectedFreeCash', () => {
     const loanIn = { amount: 30000, aprPct: 9, termMonths: 12, amortMonths: 12, closingDate: '2026-11-03', ownerPayCurrent: 700, payrollTaxPct: 10 }
     const flat = buildTermLoan({ ...loanIn, monthlyFreeCash: 0 })
     const byMonth = buildTermLoan({ ...loanIn, monthlyFreeCash: 0, freeCashByYm: f.byYm })
-    const expected = flat.endingCash + flat.schedule.reduce((s, r) => s + f.byYm[r.date.slice(0, 7)], 0)
+    // Each payment is met by the month before it.
+    const earned = r => addMonths(r.date, -1).slice(0, 7)
+    const expected = flat.endingCash + flat.schedule.reduce((s, r) => s + f.byYm[earned(r)], 0)
     expect(byMonth.endingCash).toBeCloseTo(expected, 1)
+  })
+
+  it('counts the month between closing and the first payment — December, here', () => {
+    const f = projectedFreeCash(base, sc, { ownerPayCurrent: 700, payrollTaxPct: 10 })
+    // Closes Nov 30, first payment Jan 1: that point carries December.
+    const loan = buildTermLoan({ amount: 30000, aprPct: 0, termMonths: 12, amortMonths: 12, closingDate: '2026-11-30',
+      ownerPayCurrent: 700, payrollTaxPct: 10, freeCashByYm: f.byYm })
+    expect(loan.schedule[0].date).toBe('2027-01-01')
+    expect(loan.series[1].cash - loan.series[0].cash).toBeCloseTo(f.byYm['2026-12'] - loan.schedule[0].payment, 2)
   })
 })
 

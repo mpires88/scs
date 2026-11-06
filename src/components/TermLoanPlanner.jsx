@@ -18,7 +18,7 @@ import { supabase, fetchAll } from '../lib/supabase'
 import { fetchAccounts } from '../lib/chartOfAccounts'
 import { getSetting, setSetting } from '../lib/settings'
 import { buildBalanceSheet, balanceSheetYears } from '../lib/balanceSheet'
-import { buildTermLoan, buildLoanSeeds, maxOwnerPay, ownerStepPlan, firstPaymentDate } from '../lib/termLoan'
+import { buildTermLoan, buildLoanSeeds, maxOwnerPay, ownerStepPlan, firstPaymentDate, addMonths } from '../lib/termLoan'
 import { buildProjectionBase, projectionDefaults, projectedFreeCash } from '../lib/projections'
 import Link from 'next/link'
 import { T, MON, fmt, fmt2, fmtK, fmtYm } from '../lib/theme'
@@ -140,14 +140,14 @@ export default function TermLoanPlanner({ clientId }) {
 
   // With the Projections figures on, each month's free cash comes from the
   // projection (growth, seasonality, cost of goods, draws); the coverage and
-  // pay-ceiling tests use its average over the first twelve payment months.
+  // pay-ceiling tests use its average over the twelve months that pay the first twelve payments.
   const projected = useMemo(() => {
     if (!inputs?.useProjections || !projBase || !/^\d{4}-\d{2}-\d{2}$/.test(inputs.closingDate || '')) return null
     return projectedFreeCash(projBase, { ...projectionDefaults(projBase), ...(projSc ?? {}) }, {
       ownerPayCurrent: inputs.ownerPayCurrent,
       payrollTaxPct:   inputs.payrollTaxPct,
       stepYm:          inputs.ownerPayStepDate ? inputs.ownerPayStepDate.slice(0, 7) : null,
-      fromYm:          firstPaymentDate(inputs.closingDate).slice(0, 7),
+      fromYm:          addMonths(firstPaymentDate(inputs.closingDate), -1).slice(0, 7), // the month that pays the first payment
     })
   }, [inputs, projBase, projSc])
   // SSDI off: no earnings limit and no check, everywhere downstream.
@@ -304,7 +304,7 @@ export default function TermLoanPlanner({ clientId }) {
               <div style={inputRow}>
                 <span style={inputLabel}>
                   Use the Projections figures
-                  <InfoTip title="Use the Projections figures">On: each month’s free cash comes from the Projections page — its revenue growth, the season, cost of goods, expense growth and owner draws — so the bank balance grows (or shrinks) with the business. The coverage and pay-ceiling figures use the average of the first twelve payment months. Off: one flat free-cash figure, entered here, for every month.</InfoTip>
+                  <InfoTip title="Use the Projections figures">On: each month’s free cash comes from the Projections page — its revenue growth, the season, cost of goods, expense growth and owner draws — so the bank balance grows (or shrinks) with the business. The coverage and pay-ceiling figures use the average of the twelve months that pay the first twelve payments. Off: one flat free-cash figure, entered here, for every month.</InfoTip>
                 </span>
                 <input type="checkbox" checked={!!inputs.useProjections} onChange={e => setField('useProjections', e.target.checked)} />
               </div>
@@ -312,7 +312,7 @@ export default function TermLoanPlanner({ clientId }) {
                 ? <div style={inputRow}>
                     <span style={inputLabel}>
                       Free cash / month
-                      <InfoTip title="Free cash from Projections">The projection’s profit before owner pay, less the owner’s current pay and its payroll tax, less draws — before card payments and this loan’s payment. Shown is the average of the first twelve payment months; the bank balance uses each month’s own figure. The flat {fmt(inputs.monthlyFreeCash)} entered before is kept for when this is turned off.</InfoTip>
+                      <InfoTip title="Free cash from Projections">The projection’s profit before owner pay, less the owner’s current pay and its payroll tax, less draws — before card payments and this loan’s payment. Shown is the average of the twelve months that pay the first twelve payments; the bank balance uses each month’s own figure. The flat {fmt(inputs.monthlyFreeCash)} entered before is kept for when this is turned off.</InfoTip>
                     </span>
                     <span style={{ fontSize: 12, color: T.navy, fontWeight: 600, fontVariantNumeric: 'tabular-nums' }}>
                       {fmt(projected.avg)} <span style={{ fontWeight: 400, color: '#9ca3af', fontSize: 10.5 }}>avg · <Link href="/projections" style={{ color: T.steel }}>Projections</Link></span>

@@ -244,7 +244,8 @@ describe('accountant payable and owner pay', () => {
     expect(stepped.step.freeCash).toBe(1500 - 3300)
     // Same free cash and coverage before the step; months after drop by the extra pay.
     expect(stepped.dscr).toBe(flat.dscr)
-    const k = stepped.schedule.findIndex(r => r.date === '2027-06-01') + 1
+    // The Jun 1 point is May's money, still at the old pay; Jul 1 carries June's.
+    const k = stepped.schedule.findIndex(r => r.date === '2027-07-01') + 1
     expect(stepped.series[k - 1].cash).toBe(flat.series[k - 1].cash)
     expect(stepped.series[k].cash).toBeCloseTo(flat.series[k].cash - (4000 - 1210), 2)
     // A date past maturity leaves the loan alone.
